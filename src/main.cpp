@@ -479,7 +479,8 @@ int RunBridgeLoop(int event_fd, int command_fd) {
       }
       if (event.type == InboundEvent::Type::Bye) {
         state.closed = true;
-        screen.Exit();
+        // Keep the TUI open so the status bar can show the disconnected state;
+        // Ctrl+Q still exits normally.
       }
     }
     if (events.is_closed() && events.empty() && !state.closed) state.closed = true;
