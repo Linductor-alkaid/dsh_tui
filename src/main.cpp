@@ -535,11 +535,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       }
       if (event.type == InboundEvent::Type::Bye) {
         state.closed = true;
-        // Keep the TUI open so the status bar can show the disconnected state;
-        // Ctrl+Q still exits normally.
+        // Interactive terminals keep the TUI open so the status bar can show
+        // the disconnected state; non-interactive test runners exit so bridge
+        // tests do not hang after the transport closes.
+        if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) screen.Exit();
       }
     }
-    if (events.is_closed() && events.empty() && !state.closed) state.closed = true;
+    if (events.is_closed() && events.empty() && !state.closed) {
+      state.closed = true;
+      if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) screen.Exit();
+    }
   };
 
   auto AnswerCurrentQuestion = [&] {
