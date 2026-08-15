@@ -645,18 +645,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, model_menu, reasoning_menu});
   auto main_container = Container::Vertical({input_component});
 
-  // Responsive WebUI frame: below these widths the fixed rails give way to
-  // the conversation pane instead of squeezing it to zero width.
-  bool ui_show_sidebar = true;
-  bool ui_show_status = true;
-  auto root_container = Container::Horizontal({Maybe(sidebar_container, &ui_show_sidebar), main_container});
+  // User-resizable panes. The terminal can still hide a rail automatically on
+  // narrow windows; widening it brings the last non-zero size back.
+  int sidebar_width = 34;
+  int status_width = 38;
+  bool sidebar_visible = true;
+  bool status_visible = true;
 
-  auto renderer = Renderer(root_container, [&] {
-    const int width = screen.dimx();
-    ui_show_sidebar = width >= 110;
-    ui_show_status = width >= 150;
-
-    // Sidebar.
+  auto BuildSidebar = [&] {
     Elements sidebar;
     sidebar.push_back(text("工作区") | bold | color(Color::Cyan));
     if (state.workspaces.empty()) {
@@ -677,11 +673,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     sidebar.push_back(text("思考深度") | bold | color(Color::Cyan));
     sidebar.push_back(reasoning_menu->Render() | yframe);
     sidebar.push_back(filler());
-    Element sidebar_panel = vbox(std::move(sidebar)) | yframe | border | size(WIDTH, EQUAL, 34);
+    return vbox(std::move(sidebar)) | yframe | border;
+  };
 
-    // Main conversation. Render the complete retained log; the frame below is
-    // focus-positioned so new output sticks to the bottom while PgUp/PgDn can
-    // move through earlier history.
+  auto sidebar_pane = Renderer(sidebar_container, [&] { return BuildSidebar(); });
+
+  auto status_pane = Renderer([&] {
+    return StatsPanel(state) | yframe | border;
+  });
+
+  auto BuildMain = [&] {
     Elements messages;
     for (size_t i = 0; i < state.messages.size(); ++i) {
       messages.push_back(RenderMessage(state.messages[i]));
@@ -695,7 +696,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
     Element question_panel = QuestionPanel(state);
     Elements main_lines;
-    if (ui_show_status) {
+    if (status_width > 0) {
       main_lines.push_back(hbox({
           text(" DeepSeek Harness ") | bold | color(Color::Cyan),
           filler(),
@@ -708,7 +709,6 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
           text(state.session_id.empty() ? "未连接" : "session " + ShortId(state.session_id)) | dim,
       }));
     } else {
-      // Compact status line when the right rail is hidden.
       std::string compact = BridgeStatusText(state);
       if (!state.model.empty()) compact += " · " + state.model;
       if (!state.reasoning_effort.empty()) compact += " · 思考 " + state.reasoning_effort;
@@ -733,25 +733,65 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_component->Render() | flex,
     }));
     main_lines.push_back(hbox({
-        text("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史 · Ctrl+Q 退出") | dim,
+        text("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史 · 拖动分隔线调宽 · Ctrl+Q 退出") | dim,
         filler(),
         text(BridgeStatusText(state)) |
             color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
         text("  ·  dsh_tui " + std::string(kVersion.substr(8))) | dim,
     }));
-    Element main_panel = vbox(std::move(main_lines)) | border | flex;
+    return vbox(std::move(main_lines)) | border | flex;
+  };
 
-    // Status rail, mirroring the WebUI right-side inspector. It is hidden on
-    // narrow terminals so the conversation always keeps the remaining width.
-    Element status_panel = StatsPanel(state) | yframe | border | size(WIDTH, EQUAL, 38);
+  auto main_pane = Renderer(main_container, [&] { return BuildMain(); });
 
-    if (ui_show_sidebar && ui_show_status) {
-      return hbox({sidebar_panel, separator(), main_panel, separator(), status_panel}) | border;
+  // [sidebar | splitter | main | splitter | status]
+  auto center = main_pane;
+  ResizableSplitOption sidebar_option;
+  sidebar_option.main = Maybe(sidebar_pane, &sidebar_visible);
+  sidebar_option.back = center;
+  sidebar_option.direction = Direction::Left;
+  sidebar_option.main_size = &sidebar_width;
+  sidebar_option.min = 0;
+  sidebar_option.max = 60;
+  sidebar_option.separator_func = [&] {
+    return sidebar_visible ? separatorDouble() | color(Color::Cyan) : emptyElement();
+  };
+  center = ResizableSplit(std::move(sidebar_option));
+
+  ResizableSplitOption status_option;
+  status_option.main = Maybe(status_pane, &status_visible);
+  status_option.back = center;
+  status_option.direction = Direction::Right;
+  status_option.main_size = &status_width;
+  status_option.min = 0;
+  status_option.max = 60;
+  status_option.separator_func = [&] {
+    return status_visible ? separatorDouble() | color(Color::Cyan) : emptyElement();
+  };
+  center = ResizableSplit(std::move(status_option));
+
+  auto renderer = Renderer(center, [&] {
+    const int width = screen.dimx();
+    // Auto-hide rails below the thresholds, but only touch the sizes on a
+    // visibility transition so a user's drag is never overwritten frame to
+    // frame.
+    const bool want_sidebar = width >= 110;
+    const bool want_status = width >= 150;
+    const bool was_sidebar = sidebar_visible;
+    const bool was_status = status_visible;
+    if (want_sidebar) {
+      if (!was_sidebar) sidebar_width = 34;
+    } else {
+      sidebar_width = 0;
     }
-    if (ui_show_sidebar) {
-      return hbox({sidebar_panel, separator(), main_panel}) | border;
+    if (want_status) {
+      if (!was_status) status_width = 38;
+    } else {
+      status_width = 0;
     }
-    return main_panel;
+    sidebar_visible = want_sidebar;
+    status_visible = want_status;
+    return center->Render() | border;
   });
   auto main_component = CatchEvent(renderer, [&](Event event) {
     if (event == Event::Custom) { DrainEvents(); return true; }

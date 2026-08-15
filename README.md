@@ -82,6 +82,7 @@ DSH_LAUNCHER="/path/to/deepseek-dsh-bin" ./scripts/run-tui.sh
 - `ask_user_question` 与 approval 交互
 - 状态面板：模型、cwd、token、上下文窗口、回合/步骤、LLM/工具/首 token 耗时、待办
 - Esc / Ctrl+C 停止当前回合，Ctrl+N 新建会话，Ctrl+Q 退出
+- 窗口大小可用鼠标拖动：会话区与工作区、状态栏之间的分隔线可拖拽调整
 - 窄终端自适应：优先保证会话区，状态栏/工作区按宽度隐藏
 - 会话历史 PgUp/PgDn 滚动，新消息默认吸底显示
 
