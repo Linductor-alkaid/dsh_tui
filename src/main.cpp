@@ -362,8 +362,10 @@ int RunChildMode() {
 
   std::vector<std::string> workspace_entries;
   std::vector<std::string> session_entries;
+  std::vector<std::string> model_entries;
   int workspace_selected = 0;
   int session_selected = 0;
+  int model_selected = 0;
 
   auto RebuildWorkspaceMenu = [&] {
     workspace_entries.clear();
@@ -392,6 +394,22 @@ int RunChildMode() {
     if (session_selected >= static_cast<int>(session_entries.size())) session_selected = 0;
   };
 
+  auto RebuildModelMenu = [&] {
+    model_entries.clear();
+    for (const auto& model : state.models) {
+      model_entries.push_back((model.name.empty() ? model.id : model.name) + "  (" + model.provider + ")");
+    }
+    if (model_entries.empty()) model_entries.push_back("（读取模型中…）");
+    if (model_selected >= static_cast<int>(model_entries.size())) model_selected = 0;
+    for (size_t i = 0; i < state.models.size(); ++i) {
+      if (state.models[i].provider == state.provider && state.models[i].id == state.model) {
+        model_selected = static_cast<int>(i);
+        break;
+      }
+    }
+  };
+  RebuildModelMenu();
+
   MenuOption workspace_option = MenuOption::Vertical();
   workspace_option.on_change = [&] { RebuildSessionMenu(); };
   workspace_option.on_enter = [&] { /* selection updates session list */ };
@@ -418,6 +436,17 @@ int RunChildMode() {
   };
   auto session_menu = Menu(&session_entries, &session_selected, session_option);
 
+  MenuOption model_option = MenuOption::Vertical();
+  model_option.on_enter = [&] {
+    if (model_selected < 0 || model_selected >= static_cast<int>(state.models.size())) return;
+    const ModelInfo& model = state.models[model_selected];
+    OutboundCommand command;
+    command.type = "set-model";
+    command.text = model.provider + "|" + model.id;
+    SendCommand(kCommandFd, command);
+  };
+  auto model_menu = Menu(&model_entries, &model_selected, model_option);
+
   auto Send = [&](const OutboundCommand& command) {
     if (!SendCommand(kCommandFd, command)) {
       state.Add(MessageRole::Error, "无法写入 dsh 桥接进程，连接可能已断开。");
@@ -431,6 +460,17 @@ int RunChildMode() {
       if (event.type == InboundEvent::Type::Workspaces || event.type == InboundEvent::Type::Sessions) {
         RebuildWorkspaceMenu();
         RebuildSessionMenu();
+      }
+      if (event.type == InboundEvent::Type::Models || event.type == InboundEvent::Type::Hello) {
+        RebuildModelMenu();
+        if (event.type == InboundEvent::Type::Hello) {
+          for (size_t i = 0; i < state.models.size(); ++i) {
+            if (state.models[i].provider == state.provider && state.models[i].id == state.model) {
+              model_selected = static_cast<int>(i);
+              break;
+            }
+          }
+        }
       }
       if (event.type == InboundEvent::Type::Bye) {
         state.closed = true;
@@ -523,7 +563,7 @@ int RunChildMode() {
   auto input_component = Input(&input_text, "输入消息，Enter 发送", input_option);
   auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
 
-  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu});
+  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, model_menu});
   auto main_container = Container::Vertical({input_component});
   auto root_container = Container::Horizontal({sidebar_container, main_container});
 
@@ -541,7 +581,10 @@ int RunChildMode() {
     sidebar.push_back(new_session_button->Render());
     sidebar.push_back(separatorEmpty());
     sidebar.push_back(text("会话") | bold | color(Color::Cyan));
-    sidebar.push_back(session_menu->Render() | yframe | flex);
+    sidebar.push_back(session_menu->Render() | yframe);
+    sidebar.push_back(separatorEmpty());
+    sidebar.push_back(text("模型") | bold | color(Color::Cyan));
+    sidebar.push_back(model_menu->Render() | yframe | flex);
     Element sidebar_panel = vbox(std::move(sidebar)) | border | size(WIDTH, EQUAL, 34);
 
     // Main conversation.

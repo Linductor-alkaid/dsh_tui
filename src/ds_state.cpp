@@ -84,6 +84,10 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       sessions = event.sessions;
       break;
 
+    case InboundEvent::Type::Models:
+      models = event.models;
+      break;
+
     case InboundEvent::Type::History:
       messages.clear();
       for (const auto& item : event.history) {

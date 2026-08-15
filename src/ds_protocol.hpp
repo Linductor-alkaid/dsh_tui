@@ -19,6 +19,12 @@ struct WorkspaceInfo {
   std::vector<std::string> session_ids;
 };
 
+struct ModelInfo {
+  std::string provider;
+  std::string id;
+  std::string name;
+};
+
 struct SessionInfo {
   std::string id;
   std::string title;
@@ -66,6 +72,7 @@ struct InboundEvent {
     Reset,
     Workspaces,
     Sessions,
+    Models,
     History,
     Message,
     Delta,
@@ -91,6 +98,7 @@ struct InboundEvent {
 
   std::vector<WorkspaceInfo> workspaces;
   std::vector<SessionInfo> sessions;
+  std::vector<ModelInfo> models;
   std::vector<HistoryMessage> history;
   std::vector<Question> questions;
   std::vector<TodoItem> todos;

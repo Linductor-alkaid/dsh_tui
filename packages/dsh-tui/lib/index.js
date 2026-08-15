@@ -100,6 +100,32 @@ function truncate(text, limit = 6000) {
   return `${text.slice(0, limit)}\n…(truncated)`;
 }
 
+function installModelSelection(agentCtx, selection) {
+  const disposeAssembly = agentCtx.on("system-prompt/assemble", async (_assembly, _context, next) => {
+    const selected = selection.current;
+    const assembled = await next();
+    selection.assembled = selected;
+    if (selected === undefined) return assembled;
+    return {
+      ...assembled,
+      variables: { ...assembled.variables, provider: selected.provider, model: selected.model }
+    };
+  });
+  const disposeRequest = agentCtx.on("agent/request", async (_payload, next) => {
+    const resolved = await next();
+    const selected = selection.assembled;
+    if (selected === undefined) return resolved;
+    const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved;
+    return {
+      ...withoutInheritedEffort,
+      provider: selected.provider,
+      model: selected.model,
+      ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort })
+    };
+  });
+  return () => { disposeAssembly(); disposeRequest(); };
+}
+
 function messageSummary(message) {
   return truncate(contentToText(message.content), 6000);
 }
@@ -149,7 +175,7 @@ export function apply(ctx, config) {
   let shuttingDown = false;
   let disposed = false;
   let switching = false;
-  let selection;
+  const selectionRef = { current: undefined, assembled: undefined };
   const closeListeners = [];
   const pendingQuestions = new Map();
   const pendingApprovals = new Map();
@@ -195,6 +221,29 @@ export function apply(ctx, config) {
       ttftMs: projection?.ttftMs ?? 0,
       decodeMs: projection?.decodeMs ?? 0
     });
+  };
+
+  const postModels = async () => {
+    let llm;
+    try {
+      llm = ctx.get("llm");
+    } catch {
+      return;
+    }
+    if (!llm) return;
+    try {
+      const providers = llm.listProviders?.() ?? [];
+      const models = [];
+      for (const provider of providers) {
+        const listed = (await llm.listModels?.(provider.id)) ?? [];
+        for (const model of listed) {
+          models.push({ provider: provider.id, id: model.id, name: model.name ?? model.id });
+        }
+      }
+      post({ type: "models", models });
+    } catch {
+      // The model catalog is advisory; the conversation remains usable.
+    }
   };
 
   const postWorkspaces = () => {
@@ -255,23 +304,23 @@ export function apply(ctx, config) {
       usageTotals.cacheWriteTokens = 0;
       contextWindow = 0;
 
-      selection = ctx.get("agentDefaultModel")?.currentSelection();
+      selectionRef.current = ctx.get("agentDefaultModel")?.currentSelection();
       const agentOptions = {
-        provider: selection?.provider,
-        model: selection?.model
+        provider: selectionRef.current?.provider,
+        model: selectionRef.current?.model
       };
       if (options.resumeSessionId) {
         liveHandle = await ctx.get("agents").resume({
           resumeSessionId: String(options.resumeSessionId),
           agentOptions,
-          setup: () => {}
+          setup: (agentCtx) => { installModelSelection(agentCtx, selectionRef); }
         });
       } else {
         liveHandle = await ctx.get("agents").create({
           sessionId: `session-${randomUUID()}`,
           meta: { cwd: options.cwd ?? process.cwd() },
           agentOptions,
-          setup: () => {}
+          setup: (agentCtx) => { installModelSelection(agentCtx, selectionRef); }
         });
       }
       liveAgent = liveHandle.agent;
@@ -285,8 +334,8 @@ export function apply(ctx, config) {
       post({
         type: "hello",
         sessionId: liveAgent.session.id,
-        provider: selection?.provider ?? "",
-        model: selection?.model ?? "",
+        provider: selectionRef.current?.provider ?? "",
+        model: selectionRef.current?.model ?? "",
         cwd: liveAgent.session.header?.cwd ?? process.cwd(),
         resumed: Boolean(options.resumeSessionId)
       });
@@ -335,6 +384,32 @@ export function apply(ctx, config) {
           const snapshot = workspaceSnapshot();
           const session = snapshot.sessions.find((item) => item.id === sessionId);
           await switchSession({ resumeSessionId: sessionId, cwd: session?.cwd });
+        }
+        break;
+      }
+      case "set-model": {
+        const [provider, model] = String(command.text ?? "").split("|");
+        if (provider && model) {
+          selectionRef.current = {
+            provider,
+            model,
+            ...(selectionRef.current?.reasoningEffort ? { reasoningEffort: selectionRef.current.reasoningEffort } : {})
+          };
+          try {
+            await ctx.get("agentDefaultModel")?.saveSelection(selectionRef.current);
+          } catch {
+            // The current process-wide selection still applies for live agents.
+          }
+          if (liveAgent) {
+            post({
+              type: "hello",
+              sessionId: liveAgent.session.id,
+              provider,
+              model,
+              cwd: liveAgent.session.header?.cwd ?? process.cwd(),
+              resumed: Boolean(config.resumeSessionId)
+            });
+          }
         }
         break;
       }
@@ -547,6 +622,7 @@ export function apply(ctx, config) {
         const binary = resolveBinary(config.binaryPath);
         attachChild(binary);
         postWorkspaces();
+        void postModels();
         post({
           type: "history",
           messages: historyPayload(liveAgent.session.events, liveAgent.session.firstLiveSeq)
@@ -554,8 +630,8 @@ export function apply(ctx, config) {
         post({
           type: "hello",
           sessionId: liveAgent.session.id,
-          provider: selection?.provider ?? "",
-          model: selection?.model ?? "",
+          provider: selectionRef.current?.provider ?? "",
+          model: selectionRef.current?.model ?? "",
           cwd: liveAgent.session.header?.cwd ?? process.cwd(),
           resumed: Boolean(config.resumeSessionId)
         });

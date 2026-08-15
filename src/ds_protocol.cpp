@@ -100,6 +100,20 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     }
     return event;
   }
+  if (type == "models") {
+    event.type = InboundEvent::Type::Models;
+    const Json* models = json.find("models");
+    if (models != nullptr && models->is_array()) {
+      for (const auto& model : models->as_array()) {
+        ModelInfo item;
+        item.provider = StringField(model, "provider");
+        item.id = StringField(model, "id");
+        item.name = StringField(model, "name");
+        event.models.push_back(std::move(item));
+      }
+    }
+    return event;
+  }
   if (type == "history") {
     event.type = InboundEvent::Type::History;
     const Json* messages = json.find("messages");
