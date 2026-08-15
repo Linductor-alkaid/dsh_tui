@@ -155,6 +155,14 @@ Element StatsPanel(const DeepSeekState& state) {
   lines.push_back(hbox({text("桥接: "),
                         text(BridgeStatusText(state)) | color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow)}));
   if (!state.error.empty()) lines.push_back(paragraph(state.error) | color(Color::Red));
+  if (!state.bridge_log.empty()) {
+    lines.push_back(separatorEmpty());
+    lines.push_back(text("桥接日志") | bold | color(Color::Yellow));
+    size_t log_start = state.bridge_log.size() > 4 ? state.bridge_log.size() - 4 : 0;
+    for (size_t i = log_start; i < state.bridge_log.size(); ++i) {
+      lines.push_back(paragraph(state.bridge_log[i]) | color(Color::Yellow) | dim);
+    }
+  }
   lines.push_back(hbox({text("状态: "), text(state.running ? "● 运行中" : "○ 空闲") |
                                           color(state.running ? Color::Yellow : Color::Green)}));
   lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
@@ -334,7 +342,13 @@ int RunSelfTest() {
   return 0;
 }
 
-int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error = {}) {
+int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error = {},
+                  bool retry_available = false, bool* retry_requested = nullptr,
+                  int stderr_fd = -1) {
+  if (std::getenv("DSH_TUI_DEBUG_FDS") != nullptr) {
+    std::fprintf(stderr, "RunBridgeLoop event_fd=%d command_fd=%d stderr_fd=%d\n",
+                 event_fd, command_fd, stderr_fd);
+  }
   executor::Executor executor;
   executor::ExecutorConfig executor_config;
   executor_config.min_threads = 1;
@@ -365,7 +379,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
   executor::WorkerHandle worker_handle;
   if (event_fd >= 0) {
-    auto worker = std::make_unique<BridgeReader>(event_fd, &events, &screen);
+    auto worker = std::make_unique<BridgeReader>(event_fd, &events, &screen, stderr_fd);
     executor::BlockingWorkerSpec spec;
     spec.name = "dsh-tui-bridge-reader";
     spec.config.thread_name = "dsh-tui-bridge";
@@ -375,6 +389,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       state.closed = true;
       state.error = worker_handle.start_result().message;
       state.Add(MessageRole::Error, "桥接读取线程启动失败: " + state.error);
+      if (std::getenv("DSH_TUI_DEBUG_FDS") != nullptr) {
+        std::fprintf(stderr, "bridge worker start failed: %s\n", state.error.c_str());
+      }
     }
   }
 
@@ -516,7 +533,15 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto DrainEvents = [&] {
     InboundEvent event;
     while (events.try_receive(event)) {
+      bool was_closed = state.closed;
       state.Apply(event);
+      if (!was_closed && state.closed &&
+          (event.type == InboundEvent::Type::Bye || event.type == InboundEvent::Type::Error)) {
+        std::string reason = state.error.empty()
+                                 ? (state.bridge_log.empty() ? "无桥接日志" : state.bridge_log.back())
+                                 : state.error;
+        state.Add(MessageRole::Error, "桥接已断开：" + reason);
+      }
       if (event.type == InboundEvent::Type::Workspaces || event.type == InboundEvent::Type::Sessions) {
         RebuildWorkspaceMenu();
         RebuildSessionMenu();
@@ -543,6 +568,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     if (events.is_closed() && events.empty() && !state.closed) {
       state.closed = true;
+      std::string reason = state.error.empty()
+                               ? (state.bridge_log.empty() ? "无桥接日志" : state.bridge_log.back())
+                               : state.error;
+      state.Add(MessageRole::Error, "桥接已断开：" + reason);
       if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) screen.Exit();
     }
   };
@@ -738,7 +767,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_component->Render() | flex,
     }));
     main_lines.push_back(hbox({
-        text("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史 · 拖动分隔线调宽 · Ctrl+Q 退出") | dim,
+        text(std::string("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史") +
+                 (retry_available ? " · Ctrl+R 重连" : "") + " · Ctrl+Q 退出") | dim,
         filler(),
         text(BridgeStatusText(state)) |
             color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
@@ -808,6 +838,11 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       return true;
     }
     if (event == Event::CtrlN) { NewSessionInWorkspace(); return true; }
+    if (event == Event::CtrlR && retry_available && (state.closed || !state.hello_seen)) {
+      if (retry_requested != nullptr) *retry_requested = true;
+      screen.Exit();
+      return true;
+    }
     if (event == Event::PageUp) {
       stick_to_bottom = false;
       scroll_anchor = std::max(0.0, scroll_anchor - 0.12);
@@ -853,16 +888,24 @@ int RunChildMode() {
 }
 
 int RunStandaloneMode(const std::string& resume_session_id) {
-  std::string error;
-  if (!EnsureTuiProfile(error)) {
-    return RunBridgeLoop(-1, -1, error);
-  }
-  BridgeProcess process = SpawnDeepSeekBridge(resume_session_id, error);
-  if (process.pid <= 0) {
-    return RunBridgeLoop(-1, -1, error);
-  }
-  int code = RunBridgeLoop(process.event_fd, process.command_fd);
-  ReapBridgeProcess(process);
+  bool retry_requested = false;
+  int code = 0;
+  do {
+    retry_requested = false;
+    std::string error;
+    if (!EnsureTuiProfile(error)) {
+      code = RunBridgeLoop(-1, -1, error, true, &retry_requested);
+      continue;
+    }
+    BridgeProcess process = SpawnDeepSeekBridge(resume_session_id, error);
+    if (process.pid <= 0) {
+      code = RunBridgeLoop(-1, -1, error, true, &retry_requested);
+      continue;
+    }
+    code = RunBridgeLoop(process.event_fd, process.command_fd, "", true,
+                         &retry_requested, process.stderr_fd);
+    ReapBridgeProcess(process);
+  } while (retry_requested);
   return code;
 }
 

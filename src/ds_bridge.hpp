@@ -17,14 +17,15 @@ namespace dsh_tui {
 class BridgeReader final : public executor::IBlockingIoWorker {
  public:
   BridgeReader(int event_fd, executor::comm::MpscChannel<InboundEvent>* events,
-               ftxui::App* screen)
-      : event_fd_(event_fd), events_(events), screen_(screen) {}
+               ftxui::App* screen, int stderr_fd = -1)
+      : event_fd_(event_fd), stderr_fd_(stderr_fd), events_(events), screen_(screen) {}
 
   void run(std::stop_token stop_token) override;
   void wakeup() noexcept override {}
 
  private:
   int event_fd_ = -1;
+  int stderr_fd_ = -1;
   executor::comm::MpscChannel<InboundEvent>* events_ = nullptr;
   ftxui::App* screen_ = nullptr;
 };

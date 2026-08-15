@@ -91,6 +91,7 @@ struct InboundEvent {
     Stats,
     Ask,
     Approval,
+    BridgeLog,
     Error,
     Bye,
   };

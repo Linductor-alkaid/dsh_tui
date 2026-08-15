@@ -78,6 +78,9 @@ def test_child_mode(binary):
     os.close(event_r)
     os.close(command_w)
 
+    # Deliver after the FTXUI loop has started, so the test also covers the
+    # worker -> Event::Custom -> UI wakeup path (not only the pre-loop drain).
+    time.sleep(1.0)
     events = [
         {"type": "hello", "sessionId": "test", "model": "m", "provider": "p", "cwd": "/tmp"},
         {"type": "history", "messages": [{"role": "user", "text": "hi"}]},

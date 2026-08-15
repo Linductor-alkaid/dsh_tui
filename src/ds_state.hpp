@@ -52,6 +52,7 @@ class DeepSeekState {
   std::deque<ChatMessage> messages;
   TokenStats stats;
   std::vector<TodoItem> todos;
+  std::vector<std::string> bridge_log;
   PendingAsk ask;
   PendingApproval approval;
 

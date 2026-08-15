@@ -218,6 +218,11 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     event.reason = StringField(json, "reason");
     return event;
   }
+  if (type == "bridge-log") {
+    event.type = InboundEvent::Type::BridgeLog;
+    event.text = StringField(json, "text");
+    return event;
+  }
   if (type == "error") {
     event.type = InboundEvent::Type::Error;
     event.text = StringField(json, "message");

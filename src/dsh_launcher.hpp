@@ -9,6 +9,7 @@ struct BridgeProcess {
   int pid = -1;
   int event_fd = -1;    // parent reads JSON events emitted by dsh on its fd 3
   int command_fd = -1;  // parent writes commands read by dsh on its fd 4
+  int stderr_fd = -1;   // captured dsh/npx diagnostics for the status rail
 };
 
 /// Build the explicit DeepSeek Harness launcher argv. Never uses a bare `dsh`

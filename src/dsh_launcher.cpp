@@ -30,10 +30,47 @@ std::string HomeDirectory() {
 }
 
 std::string DshHome() {
-  if (const char* home = std::getenv("DSH_HOME"); home != nullptr && *home != '\0') return home;
-  return (fs::path(HomeDirectory()) / ".dsh").string();
+  static const std::string selected = [] {
+    if (const char* env = std::getenv("DSH_HOME"); env != nullptr && *env != 0) {
+      return std::string(env);
+    }
+    const fs::path default_home = fs::path(HomeDirectory()) / ".dsh";
+    std::error_code ec;
+    fs::create_directories(default_home / "profiles" / "tui", ec);
+    ec.clear();
+    const fs::path probe = default_home / "profiles" / "tui" / ".dsh_tui_write_test";
+    bool writable = false;
+    {
+      std::ofstream output(probe);
+      writable = output.good();
+    }
+    fs::remove(probe, ec);
+    if (writable) return default_home.string();
+    const std::string home = HomeDirectory();
+    std::vector<fs::path> candidates;
+    if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg != nullptr && *xdg != 0) {
+      candidates.push_back(fs::path(xdg) / "dsh_tui");
+    }
+    if (!home.empty()) {
+      candidates.push_back(fs::path(home) / ".local" / "state" / "dsh_tui");
+      candidates.push_back(fs::path(home) / ".cache" / "dsh_tui");
+    }
+    candidates.push_back(fs::path("/tmp") / ("dsh_tui-home-" + std::to_string(::getuid())));
+    for (const auto& candidate : candidates) {
+      fs::create_directories(candidate / "profiles" / "tui", ec);
+      ec.clear();
+      const fs::path candidate_probe = candidate / "profiles" / "tui" / ".dsh_tui_write_test";
+      std::ofstream candidate_output(candidate_probe);
+      if (!candidate_output) continue;
+      candidate_output << "ok";
+      candidate_output.close();
+      fs::remove(candidate_probe, ec);
+      return candidate.string();
+    }
+    return default_home.string();
+  }();
+  return selected;
 }
-
 void WriteFile(const fs::path& path, std::string_view content) {
   std::ofstream output(path);
   output << content;
@@ -63,10 +100,29 @@ void CloseFd(int& fd) {
 
 }  // namespace
 
+std::string FindCachedDeepSeekLauncher() {
+  const fs::path home = HomeDirectory();
+  if (home.empty()) return {};
+  const fs::path npx_root = home / ".npm" / "_npx";
+  std::error_code ec;
+  if (!fs::exists(npx_root, ec)) return {};
+  for (fs::directory_iterator it(npx_root, ec), end; !ec && it != end; it.increment(ec)) {
+    const fs::path package = it->path() / "node_modules" / "@deepseek-ai" / "dsh";
+    if (!fs::exists(package / "package.json", ec)) continue;
+    const fs::path bin = it->path() / "node_modules" / ".bin" / "dsh";
+    if (fs::is_regular_file(bin) || fs::is_symlink(bin)) return bin.string();
+    const fs::path js = package / "lib" / "bin.js";
+    if (fs::is_regular_file(js)) return js.string();
+  }
+  return {};
+}
+
 std::vector<std::string> BuildDeepSeekLauncherArgv(const std::string& resume_session_id) {
   std::vector<std::string> argv;
   if (const char* custom = std::getenv("DSH_BIN"); custom != nullptr && *custom != '\0') {
     argv.push_back(custom);
+  } else if (const std::string cached = FindCachedDeepSeekLauncher(); !cached.empty()) {
+    argv.push_back(cached);
   } else {
     argv.push_back("npx");
     argv.push_back("--yes");
@@ -164,10 +220,12 @@ BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
   std::vector<std::string> argv = BuildDeepSeekLauncherArgv(resume_session_id);
   int event_pipe[2] = {-1, -1};
   int command_pipe[2] = {-1, -1};
-  if (::pipe(event_pipe) != 0 || ::pipe(command_pipe) != 0) {
+  int stderr_pipe[2] = {-1, -1};
+  if (::pipe(event_pipe) != 0 || ::pipe(command_pipe) != 0 || ::pipe(stderr_pipe) != 0) {
     error = "pipe() failed: " + std::string(std::strerror(errno));
     CloseFd(event_pipe[0]); CloseFd(event_pipe[1]);
     CloseFd(command_pipe[0]); CloseFd(command_pipe[1]);
+    CloseFd(stderr_pipe[0]); CloseFd(stderr_pipe[1]);
     return {};
   }
 
@@ -176,29 +234,27 @@ BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
     error = "fork() failed: " + std::string(std::strerror(errno));
     CloseFd(event_pipe[0]); CloseFd(event_pipe[1]);
     CloseFd(command_pipe[0]); CloseFd(command_pipe[1]);
+    CloseFd(stderr_pipe[0]); CloseFd(stderr_pipe[1]);
     return {};
   }
 
   if (pid == 0) {
     (void)::dup2(event_pipe[1], 3);
     (void)::dup2(command_pipe[0], 4);
-    // The original pipe descriptors may themselves be 3 or 4; close only the
-    // descriptors that are neither of the two target fds, so the dup2 targets
-    // are never closed accidentally.
-    for (int fd : {event_pipe[0], event_pipe[1], command_pipe[0], command_pipe[1]}) {
-      if (fd != 3 && fd != 4) CloseFd(fd);
+    (void)::dup2(stderr_pipe[1], STDERR_FILENO);
+    for (int fd : {event_pipe[0], event_pipe[1], command_pipe[0], command_pipe[1],
+                   stderr_pipe[0], stderr_pipe[1]}) {
+      if (fd != 3 && fd != 4 && fd != STDERR_FILENO) CloseFd(fd);
     }
     (void)::setenv("DSH_TUI_PARENT", "1", 1);
     (void)::setenv("DSH_TUI_SOURCE_DIR", DSH_TUI_SOURCE_DIR, 1);
+    const std::string selected_home = DshHome();
+    (void)::setenv("DSH_HOME", selected_home.c_str(), 1);
 
-    // The native frontend owns the terminal. Keep dsh/npx quiet so progress
-    // or install output cannot leak through the FTXUI frame. Set
-    // DSH_TUI_DEBUG=1 to keep the bridge's stdout/stderr for diagnosis.
     if (std::getenv("DSH_TUI_DEBUG") == nullptr) {
       int devnull = ::open("/dev/null", O_WRONLY);
       if (devnull >= 0) {
         (void)::dup2(devnull, STDOUT_FILENO);
-        (void)::dup2(devnull, STDERR_FILENO);
         if (devnull > 2) ::close(devnull);
       }
     }
@@ -215,14 +271,21 @@ BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
 
   CloseFd(event_pipe[1]);
   CloseFd(command_pipe[0]);
+  CloseFd(stderr_pipe[1]);
+  if (std::getenv("DSH_TUI_DEBUG_FDS") != nullptr) {
+    std::fprintf(stderr, "dsh_tui spawn pid=%d event_fd=%d command_fd=%d stderr_fd=%d argv0=%s\n",
+                 pid, event_pipe[0], command_pipe[1], stderr_pipe[0], argv[0].c_str());
+  }
   BridgeProcess process;
   process.pid = pid;
   process.event_fd = event_pipe[0];
   process.command_fd = command_pipe[1];
+  process.stderr_fd = stderr_pipe[0];
   return process;
 }
 
 void ReapBridgeProcess(BridgeProcess& process) {
+  CloseFd(process.stderr_fd);
   if (process.pid <= 0) return;
   int status = 0;
   for (int i = 0; i < 40; ++i) {

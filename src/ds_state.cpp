@@ -51,6 +51,7 @@ void DeepSeekState::ResetConversation(const std::string& reason) {
   error.clear();
   stats = TokenStats{};
   todos.clear();
+  bridge_log.clear();
   reasoning_effort.clear();
   if (reason.empty()) {
     Add(MessageRole::Welcome, "会话已切换。输入消息开始。");
@@ -159,6 +160,11 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       ask.questions = event.questions;
       ask.index = 0;
       if (ask.active) Add(MessageRole::System, "❓ " + ask.questions.front().question);
+      break;
+
+    case InboundEvent::Type::BridgeLog:
+      bridge_log.push_back(event.text);
+      while (bridge_log.size() > 6) bridge_log.erase(bridge_log.begin());
       break;
 
     case InboundEvent::Type::Approval:
