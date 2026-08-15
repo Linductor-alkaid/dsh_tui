@@ -159,6 +159,7 @@ Element StatsPanel(const DeepSeekState& state) {
                                           color(state.running ? Color::Yellow : Color::Green)}));
   lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
   lines.push_back(text("模型: " + state.provider + " / " + state.model));
+  lines.push_back(text("思考深度: " + (state.reasoning_effort.empty() ? "默认" : state.reasoning_effort)));
   lines.push_back(text("目录: " + state.cwd));
 
   lines.push_back(separatorEmpty());
@@ -293,7 +294,8 @@ int RunSelfTest() {
   std::vector<std::string> samples = {
       R"({"type":"workspaces","workspaces":[{"id":"w","path":"/tmp","title":"demo","sessionIds":["s"]}]})",
       R"({"type":"sessions","sessions":[{"id":"s","title":"标题","cwd":"/tmp","workspaceId":"w"}]})",
-      R"({"type":"hello","sessionId":"s","model":"m","provider":"p","cwd":"/tmp","resumed":true})",
+      R"({"type":"models","models":[{"provider":"p","id":"m","name":"Model","defaultEffort":"medium","efforts":[{"id":"low","name":"低"},{"id":"medium","name":"中"},{"id":"high","name":"高"}]}]})",
+      R"({"type":"hello","sessionId":"s","model":"m","provider":"p","reasoningEffort":"high","cwd":"/tmp","resumed":true})",
       R"({"type":"history","messages":[{"role":"user","text":"你好"},{"role":"assistant","text":"你好！"}]})",
       R"({"type":"status","status":"running"})",
       R"({"type":"delta","part":"text","text":"流式"})",
@@ -313,6 +315,8 @@ int RunSelfTest() {
     state.Apply(*event);
   }
   if (state.workspaces.size() != 1 || state.sessions.size() != 1 || !state.resumed ||
+      state.models.size() != 1 || state.models[0].efforts.size() != 3 ||
+      state.reasoning_effort != "high" ||
       state.stats.context_window != 100 || state.todos.size() != 1 ||
       !state.ask.active || !state.approval.active) {
     std::cerr << "state assertions failed\n";
@@ -377,9 +381,11 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   std::vector<std::string> workspace_entries;
   std::vector<std::string> session_entries;
   std::vector<std::string> model_entries;
+  std::vector<std::string> reasoning_entries;
   int workspace_selected = 0;
   int session_selected = 0;
   int model_selected = 0;
+  int reasoning_selected = 0;
 
   auto RebuildWorkspaceMenu = [&] {
     workspace_entries.clear();
@@ -422,7 +428,30 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       }
     }
   };
+  auto RebuildReasoningMenu = [&] {
+    reasoning_entries.clear();
+    reasoning_entries.push_back("默认（跟随模型）");
+    if (model_selected >= 0 && model_selected < static_cast<int>(state.models.size())) {
+      for (const auto& effort : state.models[model_selected].efforts) {
+        reasoning_entries.push_back(effort.name.empty() ? effort.id : effort.name);
+      }
+    }
+    if (reasoning_selected >= static_cast<int>(reasoning_entries.size())) reasoning_selected = 0;
+    if (!state.reasoning_effort.empty() &&
+        model_selected >= 0 && model_selected < static_cast<int>(state.models.size())) {
+      const auto& efforts = state.models[model_selected].efforts;
+      for (size_t i = 0; i < efforts.size(); ++i) {
+        if (efforts[i].id == state.reasoning_effort) {
+          reasoning_selected = static_cast<int>(i + 1);
+          break;
+        }
+      }
+    } else {
+      reasoning_selected = 0;
+    }
+  };
   RebuildModelMenu();
+  RebuildReasoningMenu();
 
   MenuOption workspace_option = MenuOption::Vertical();
   workspace_option.on_change = [&] { RebuildSessionMenu(); };
@@ -451,6 +480,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto session_menu = Menu(&session_entries, &session_selected, session_option);
 
   MenuOption model_option = MenuOption::Vertical();
+  model_option.on_change = [&] { RebuildReasoningMenu(); };
   model_option.on_enter = [&] {
     if (model_selected < 0 || model_selected >= static_cast<int>(state.models.size())) return;
     const ModelInfo& model = state.models[model_selected];
@@ -460,6 +490,22 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     SendCommand(command_fd, command);
   };
   auto model_menu = Menu(&model_entries, &model_selected, model_option);
+
+  MenuOption reasoning_option = MenuOption::Vertical();
+  reasoning_option.on_enter = [&] {
+    OutboundCommand command;
+    command.type = "set-reasoning";
+    if (reasoning_selected <= 0) {
+      command.text = "default";
+    } else if (model_selected >= 0 && model_selected < static_cast<int>(state.models.size())) {
+      const auto& efforts = state.models[model_selected].efforts;
+      size_t index = static_cast<size_t>(reasoning_selected - 1);
+      if (index < efforts.size()) command.text = efforts[index].id;
+    }
+    if (command.text.empty()) return;
+    SendCommand(command_fd, command);
+  };
+  auto reasoning_menu = Menu(&reasoning_entries, &reasoning_selected, reasoning_option);
 
   auto Send = [&](const OutboundCommand& command) {
     if (!SendCommand(command_fd, command)) {
@@ -477,6 +523,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       }
       if (event.type == InboundEvent::Type::Models || event.type == InboundEvent::Type::Hello) {
         RebuildModelMenu();
+        RebuildReasoningMenu();
         if (event.type == InboundEvent::Type::Hello) {
           for (size_t i = 0; i < state.models.size(); ++i) {
             if (state.models[i].provider == state.provider && state.models[i].id == state.model) {
@@ -557,6 +604,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     input_text.clear();
   };
 
+  bool stick_to_bottom = true;
+  double scroll_anchor = 1.0;
+
   auto Submit = [&] {
     if (state.closed || !state.hello_seen) return;
     if (state.approval.active) AnswerApproval();
@@ -570,6 +620,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       Send(command);
     }
     input_text.clear();
+    stick_to_bottom = true;
+    scroll_anchor = 1.0;
   };
 
   InputOption input_option = InputOption::Spacious();
@@ -578,11 +630,20 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto input_component = Input(&input_text, "输入消息，Enter 发送", input_option);
   auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
 
-  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, model_menu});
+  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, model_menu, reasoning_menu});
   auto main_container = Container::Vertical({input_component});
-  auto root_container = Container::Horizontal({sidebar_container, main_container});
+
+  // Responsive WebUI frame: below these widths the fixed rails give way to
+  // the conversation pane instead of squeezing it to zero width.
+  bool ui_show_sidebar = true;
+  bool ui_show_status = true;
+  auto root_container = Container::Horizontal({Maybe(sidebar_container, &ui_show_sidebar), main_container});
 
   auto renderer = Renderer(root_container, [&] {
+    const int width = screen.dimx();
+    ui_show_sidebar = width >= 110;
+    ui_show_status = width >= 150;
+
     // Sidebar.
     Elements sidebar;
     sidebar.push_back(text("工作区") | bold | color(Color::Cyan));
@@ -599,34 +660,57 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     sidebar.push_back(session_menu->Render() | yframe);
     sidebar.push_back(separatorEmpty());
     sidebar.push_back(text("模型") | bold | color(Color::Cyan));
-    sidebar.push_back(model_menu->Render() | yframe | flex);
-    Element sidebar_panel = vbox(std::move(sidebar)) | border | size(WIDTH, EQUAL, 34);
+    sidebar.push_back(model_menu->Render() | yframe);
+    sidebar.push_back(separatorEmpty());
+    sidebar.push_back(text("思考深度") | bold | color(Color::Cyan));
+    sidebar.push_back(reasoning_menu->Render() | yframe);
+    sidebar.push_back(filler());
+    Element sidebar_panel = vbox(std::move(sidebar)) | yframe | border | size(WIDTH, EQUAL, 34);
 
-    // Main conversation.
+    // Main conversation. Render the complete retained log; the frame below is
+    // focus-positioned so new output sticks to the bottom while PgUp/PgDn can
+    // move through earlier history.
     Elements messages;
-    size_t start = state.messages.size() > state.visible_messages
-                       ? state.messages.size() - state.visible_messages : 0;
-    for (size_t i = start; i < state.messages.size(); ++i) {
+    for (size_t i = 0; i < state.messages.size(); ++i) {
       messages.push_back(RenderMessage(state.messages[i]));
       if (i + 1 < state.messages.size()) messages.push_back(separatorEmpty());
     }
     if (messages.empty()) messages.push_back(text("（暂无消息）") | dim | center);
 
+    const float anchor = stick_to_bottom ? 1.0f : static_cast<float>(scroll_anchor);
+    Element history = vbox(std::move(messages)) | vscroll_indicator | yframe |
+                      focusPositionRelative(0.0f, anchor) | flex;
+
     Element question_panel = QuestionPanel(state);
     Elements main_lines;
-    main_lines.push_back(hbox({
-        text(" DeepSeek Harness ") | bold | color(Color::Cyan),
-        filler(),
-        text(BridgeStatusText(state)) |
-            color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
-        filler(),
-        text(state.running ? "● 运行中" : "○ 空闲") |
-            color(state.running ? Color::Yellow : Color::Green),
-        filler(),
-        text(state.session_id.empty() ? "未连接" : "session " + ShortId(state.session_id)) | dim,
-    }));
+    if (ui_show_status) {
+      main_lines.push_back(hbox({
+          text(" DeepSeek Harness ") | bold | color(Color::Cyan),
+          filler(),
+          text(BridgeStatusText(state)) |
+              color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
+          filler(),
+          text(state.running ? "● 运行中" : "○ 空闲") |
+              color(state.running ? Color::Yellow : Color::Green),
+          filler(),
+          text(state.session_id.empty() ? "未连接" : "session " + ShortId(state.session_id)) | dim,
+      }));
+    } else {
+      // Compact status line when the right rail is hidden.
+      std::string compact = BridgeStatusText(state);
+      if (!state.model.empty()) compact += " · " + state.model;
+      if (!state.reasoning_effort.empty()) compact += " · 思考 " + state.reasoning_effort;
+      main_lines.push_back(hbox({
+          text(" DeepSeek Harness ") | bold | color(Color::Cyan),
+          filler(),
+          text(compact) |
+              color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
+          filler(),
+          text(state.session_id.empty() ? "未连接" : "session " + ShortId(state.session_id)) | dim,
+      }));
+    }
     main_lines.push_back(separator());
-    main_lines.push_back(vbox(std::move(messages)) | vscroll_indicator | yframe | flex);
+    main_lines.push_back(history);
     if (state.ask.active || state.approval.active) {
       main_lines.push_back(separator());
       main_lines.push_back(question_panel);
@@ -637,7 +721,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_component->Render() | flex,
     }));
     main_lines.push_back(hbox({
-        text("Enter 发送 · Esc 停止 · Ctrl+N 新建会话 · PgUp/PgDn 历史 · Ctrl+Q 退出") | dim,
+        text("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史 · Ctrl+Q 退出") | dim,
         filler(),
         text(BridgeStatusText(state)) |
             color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
@@ -645,12 +729,18 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }));
     Element main_panel = vbox(std::move(main_lines)) | border | flex;
 
-    // Status rail, mirroring the WebUI right-side inspector.
-    Element status_panel = StatsPanel(state) | border | size(WIDTH, EQUAL, 40);
+    // Status rail, mirroring the WebUI right-side inspector. It is hidden on
+    // narrow terminals so the conversation always keeps the remaining width.
+    Element status_panel = StatsPanel(state) | yframe | border | size(WIDTH, EQUAL, 38);
 
-    return hbox({sidebar_panel, separator(), main_panel, separator(), status_panel}) | border;
+    if (ui_show_sidebar && ui_show_status) {
+      return hbox({sidebar_panel, separator(), main_panel, separator(), status_panel}) | border;
+    }
+    if (ui_show_sidebar) {
+      return hbox({sidebar_panel, separator(), main_panel}) | border;
+    }
+    return main_panel;
   });
-
   auto main_component = CatchEvent(renderer, [&](Event event) {
     if (event == Event::Custom) { DrainEvents(); return true; }
     if (event == Event::CtrlQ) {
@@ -662,10 +752,24 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     if (event == Event::CtrlN) { NewSessionInWorkspace(); return true; }
     if (event == Event::PageUp) {
-      state.visible_messages = std::min<size_t>(state.visible_messages + 20, 600); return true;
+      stick_to_bottom = false;
+      scroll_anchor = std::max(0.0, scroll_anchor - 0.12);
+      return true;
     }
     if (event == Event::PageDown) {
-      state.visible_messages = state.visible_messages > 20 ? state.visible_messages - 20 : 10; return true;
+      scroll_anchor = std::min(1.0, scroll_anchor + 0.12);
+      if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
+      return true;
+    }
+    if (event == Event::Home) {
+      stick_to_bottom = false;
+      scroll_anchor = 0.0;
+      return true;
+    }
+    if (event == Event::End) {
+      stick_to_bottom = true;
+      scroll_anchor = 1.0;
+      return true;
     }
     return false;
   });

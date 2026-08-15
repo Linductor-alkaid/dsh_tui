@@ -62,6 +62,7 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     event.secondary = StringField(json, "model");
     event.third = StringField(json, "provider");
     event.detail = StringField(json, "cwd");
+    event.reasoning_effort = StringField(json, "reasoningEffort");
     event.flag = BoolField(json, "resumed");
     return event;
   }
@@ -109,6 +110,17 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
         item.provider = StringField(model, "provider");
         item.id = StringField(model, "id");
         item.name = StringField(model, "name");
+        item.default_effort = StringField(model, "defaultEffort");
+        const Json* efforts = model.find("efforts");
+        if (efforts != nullptr && efforts->is_array()) {
+          for (const auto& effort : efforts->as_array()) {
+            ReasoningEffortInfo info;
+            info.id = StringField(effort, "id");
+            info.name = StringField(effort, "name");
+            info.description = StringField(effort, "description");
+            item.efforts.push_back(std::move(info));
+          }
+        }
         event.models.push_back(std::move(item));
       }
     }

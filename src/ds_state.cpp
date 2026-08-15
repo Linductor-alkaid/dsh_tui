@@ -51,6 +51,7 @@ void DeepSeekState::ResetConversation(const std::string& reason) {
   error.clear();
   stats = TokenStats{};
   todos.clear();
+  reasoning_effort.clear();
   if (reason.empty()) {
     Add(MessageRole::Welcome, "会话已切换。输入消息开始。");
   } else {
@@ -64,6 +65,7 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       session_id = event.text;
       model = event.secondary;
       provider = event.third;
+      reasoning_effort = event.reasoning_effort;
       cwd = event.detail;
       resumed = event.flag;
       hello_seen = true;

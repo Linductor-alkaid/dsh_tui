@@ -42,6 +42,7 @@ class DeepSeekState {
   std::string session_id;
   std::string model;
   std::string provider;
+  std::string reasoning_effort;
   std::string cwd;
   std::string error;
 

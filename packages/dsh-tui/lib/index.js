@@ -237,7 +237,23 @@ export function apply(ctx, config) {
       for (const provider of providers) {
         const listed = (await llm.listModels?.(provider.id)) ?? [];
         for (const model of listed) {
-          models.push({ provider: provider.id, id: model.id, name: model.name ?? model.id });
+          let resolved;
+          try {
+            resolved = await llm.resolveModel?.(provider.id, model.id);
+          } catch {
+            resolved = undefined;
+          }
+          models.push({
+            provider: provider.id,
+            id: model.id,
+            name: model.name ?? model.id,
+            defaultEffort: resolved?.reasoning?.defaultEffort ?? "",
+            efforts: (resolved?.reasoning?.efforts ?? []).map((effort) => ({
+              id: effort.id,
+              name: effort.name ?? effort.id,
+              description: effort.description ?? ""
+            }))
+          });
         }
       }
       post({ type: "models", models });
@@ -336,6 +352,7 @@ export function apply(ctx, config) {
         sessionId: liveAgent.session.id,
         provider: selectionRef.current?.provider ?? "",
         model: selectionRef.current?.model ?? "",
+        reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
         cwd: liveAgent.session.header?.cwd ?? process.cwd(),
         resumed: Boolean(options.resumeSessionId)
       });
@@ -406,10 +423,40 @@ export function apply(ctx, config) {
               sessionId: liveAgent.session.id,
               provider,
               model,
+              reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
               cwd: liveAgent.session.header?.cwd ?? process.cwd(),
               resumed: Boolean(config.resumeSessionId)
             });
           }
+        }
+        break;
+      }
+      case "set-reasoning": {
+        const effort = String(command.text ?? "");
+        selectionRef.current = {
+          ...(selectionRef.current ?? {}),
+          ...(effort === "" || effort === "default" ? {} : { reasoningEffort: effort })
+        };
+        if (effort !== "" && effort !== "default") {
+          selectionRef.current.reasoningEffort = effort;
+        } else {
+          delete selectionRef.current.reasoningEffort;
+        }
+        try {
+          await ctx.get("agentDefaultModel")?.saveSelection(selectionRef.current);
+        } catch {
+          // The process-wide selection already applies to the live agent.
+        }
+        if (liveAgent) {
+          post({
+            type: "hello",
+            sessionId: liveAgent.session.id,
+            provider: selectionRef.current?.provider ?? "",
+            model: selectionRef.current?.model ?? "",
+            reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
+            cwd: liveAgent.session.header?.cwd ?? process.cwd(),
+            resumed: Boolean(config.resumeSessionId)
+          });
         }
         break;
       }
@@ -667,6 +714,7 @@ export function apply(ctx, config) {
           sessionId: liveAgent.session.id,
           provider: selectionRef.current?.provider ?? "",
           model: selectionRef.current?.model ?? "",
+          reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
           cwd: liveAgent.session.header?.cwd ?? process.cwd(),
           resumed: Boolean(config.resumeSessionId)
         });

@@ -19,10 +19,18 @@ struct WorkspaceInfo {
   std::vector<std::string> session_ids;
 };
 
+struct ReasoningEffortInfo {
+  std::string id;
+  std::string name;
+  std::string description;
+};
+
 struct ModelInfo {
   std::string provider;
   std::string id;
   std::string name;
+  std::string default_effort;
+  std::vector<ReasoningEffortInfo> efforts;
 };
 
 struct SessionInfo {
@@ -92,6 +100,7 @@ struct InboundEvent {
   std::string secondary;
   std::string third;
   std::string detail;
+  std::string reasoning_effort;
   bool flag = false;
   bool running = false;
   int64_t number = 0;
