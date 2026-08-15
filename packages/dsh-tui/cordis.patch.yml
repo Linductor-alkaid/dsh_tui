@@ -1,0 +1,14 @@
+# dsh-tui surface bundle. The dsh-base bundle keeps the single-session,
+# process-wide agent rows used by a TUI; this layer adds the command-line
+# provider and the native FTXUI frontend bridge.
+
+- insert:
+    - id: dsh-tui-startup
+      name: 'dsh-tui/startup'
+
+    - id: dsh-tui
+      name: 'dsh-tui'
+      inject: [dshTuiStartup]
+      config:
+        resumeSessionId: !!js ctx.dshTuiStartup.resumeSessionId
+        binaryPath: !!js ctx.dshTuiStartup.binaryPath

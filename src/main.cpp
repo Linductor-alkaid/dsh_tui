@@ -1,12 +1,10 @@
 #include <fcntl.h>
-#include <poll.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
-#include <cstdio>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -15,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "ftxui/component/app.hpp"
@@ -23,28 +22,33 @@
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
 
-#include "dsh_config.hpp"
-#include "dsh_runner.hpp"
+#include "ds_bridge.hpp"
+#include "ds_protocol.hpp"
+#include "ds_state.hpp"
 #include "executor/executor.hpp"
-#include "output_state.hpp"
 
 using namespace ftxui;
 
 namespace dsh_tui {
 namespace {
 
-constexpr std::string_view kVersion = "dsh_tui 0.2.0";
+constexpr std::string_view kVersion = "dsh_tui 0.3.0";
 
 void PrintUsage() {
   std::cout
-      << "dsh_tui — FTXUI + executor powered TUI for dancer's shell (dsh)\n\n"
-      << "Usage:\n"
-      << "  dsh_tui [--dsh /usr/bin/dsh]\n"
-      << "  dsh_tui --run-once --machines node1,node2 --command 'hostname'\n"
-      << "  dsh_tui --self-test\n"
+      << "dsh_tui — DeepSeek Harness WebUI 风格的终端界面\n\n"
+      << "通常由 `npx @deepseek-ai/dsh --profile tui` 启动，也可直接：\n"
+      << "  dsh_tui --child          # 由 dsh-tui profile 桥接进程启动\n"
+      << "  dsh_tui --demo           # 无 dsh 进程的可视化演示\n"
+      << "  dsh_tui --self-test      # 无 TTY 的协议/状态自检\n"
       << "  dsh_tui --help\n\n"
-      << "The UI builds a `dsh` command line (machine/group/all/file target,\n"
-      << "rsh/ssh options, concurrent/wait execution) and streams per-host output.\n";
+      << "请勿把这里的 dsh 与 apt 的 dancer's distributed shell 混淆；\n"
+      << "启动脚本使用 `npx @deepseek-ai/dsh`，不会调用 PATH 中的 /usr/bin/dsh。\n";
+}
+
+bool FdIsUsable(int fd) {
+  int flags = ::fcntl(fd, F_GETFL);
+  return flags >= 0 || errno != EBADF;
 }
 
 std::string Trim(std::string value) {
@@ -54,229 +58,272 @@ std::string Trim(std::string value) {
   return value.substr(begin, end - begin + 1);
 }
 
-std::string JoinOptions(const std::vector<std::string>& options) {
-  std::string joined;
-  for (size_t i = 0; i < options.size(); ++i) {
-    if (i != 0) joined.push_back(',');
-    joined += options[i];
-  }
-  return joined;
+std::string ShortId(std::string value, size_t max_chars = 8) {
+  if (value.size() <= max_chars) return value;
+  return value.substr(0, max_chars) + "…";
 }
 
-std::vector<std::string> SplitOptions(std::string value) {
-  std::vector<std::string> result;
-  std::string current;
-  for (char c : value) {
-    if (c == ',') {
-      std::string item = Trim(current);
-      if (!item.empty()) result.push_back(std::move(item));
-      current.clear();
-    } else {
-      current.push_back(c);
-    }
+std::string FormatMs(double value) {
+  if (value >= 1000.0) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1) << value / 1000.0 << "s";
+    return out.str();
   }
-  std::string item = Trim(current);
-  if (!item.empty()) result.push_back(std::move(item));
-  return result;
+  return std::to_string(static_cast<int64_t>(value)) + "ms";
 }
 
-Element RenderHostSection(const std::string& host, const HostOutput& host_output,
-                          size_t tail_lines) {
+Element RenderMessage(const ChatMessage& message) {
+  Color tint = Color::White;
+  std::string label = "·";
+  switch (message.role) {
+    case MessageRole::Welcome: tint = Color::Cyan; label = "dsh"; break;
+    case MessageRole::User: tint = Color::Green; label = "你"; break;
+    case MessageRole::Assistant: tint = Color::White; label = "dsh"; break;
+    case MessageRole::Tool: tint = Color::Yellow; label = "工具"; break;
+    case MessageRole::System: tint = Color::GrayDark; label = "系统"; break;
+    case MessageRole::Error: tint = Color::Red; label = "错误"; break;
+  }
   Elements lines;
-  size_t start = host_output.lines.size() > tail_lines ? host_output.lines.size() - tail_lines : 0;
-  if (start > 0) {
-    lines.push_back(text("  … " + std::to_string(start) + " 行更早输出") | dim);
-  }
-  for (size_t i = start; i < host_output.lines.size(); ++i) {
-    lines.push_back(paragraph(host_output.lines[i]));
-  }
-  return vbox({
-      hbox({
-          text("▸ " + host) | bold | color(Color::Cyan),
-          text("  " + std::to_string(host_output.lines.size()) + " 行") | dim,
-      }),
-      vbox(std::move(lines)),
-  });
+  lines.push_back(text(" " + label + (message.streaming ? " ▍" : "")) | bold | color(tint));
+  lines.push_back(paragraph(message.text) | color(tint));
+  return vbox(std::move(lines));
 }
 
-Element RenderOutputPanel(const RunOutput& output, size_t tail_lines, size_t max_hosts) {
-  Elements body;
-  if (!output.completed && !output.running && output.command.empty()) {
-    body.push_back(text("在下方输入命令，选择目标机器后执行。") | dim | center);
+Element QuestionPanel(const DeepSeekState& state) {
+  if (state.ask.active) {
+    const Question& question = state.ask.questions[state.ask.index];
+    Elements lines;
+    if (!question.header.empty()) lines.push_back(text(question.header) | bold | color(Color::Cyan));
+    lines.push_back(paragraph(question.question));
+    if (!question.detail.empty()) lines.push_back(paragraph(question.detail) | dim);
+    if (!question.options.empty()) {
+      for (size_t i = 0; i < question.options.size(); ++i) {
+        lines.push_back(hbox({
+            text("  " + std::to_string(i + 1) + ". ") | color(Color::Cyan),
+            text(question.options[i]),
+        }));
+      }
+    }
+    lines.push_back(text("输入选项编号或自由回答，Enter 提交") | dim);
+    return window(text(" 回答 (" + std::to_string(state.ask.index + 1) + "/" +
+                       std::to_string(state.ask.questions.size()) + ") "),
+                  vbox(std::move(lines)));
+  }
+  if (state.approval.active) {
+    Elements lines;
+    lines.push_back(text("工具: " + state.approval.tool_name) | bold);
+    if (!state.approval.reason.empty()) lines.push_back(paragraph(state.approval.reason));
+    lines.push_back(text("Enter / y = 允许一次，n = 拒绝") | dim);
+    return window(text(" 权限请求 "), vbox(std::move(lines)));
+  }
+  return emptyElement();
+}
+
+Element TodoPanel(const std::vector<TodoItem>& todos) {
+  Elements lines;
+  if (todos.empty()) {
+    lines.push_back(text("（无）") | dim);
   } else {
-    if (!output.target_summary.empty()) {
-      body.push_back(hbox({
-          text("目标: ") | dim,
-          text(output.target_summary) | color(Color::Green),
-          filler(),
-          text(output.command.empty() ? "" : "命令: " + output.command) | dim,
-      }));
-      body.push_back(separatorEmpty());
-    }
-
-    if (!output.spawn_error.empty()) {
-      body.push_back(text(output.spawn_error) | color(Color::Red));
-    }
-
-    size_t shown = 0;
-    for (const auto& [host, host_output] : output.hosts) {
-      if (shown++ >= max_hosts) {
-        body.push_back(text("… 其余主机输出未显示（共 " +
-                            std::to_string(output.hosts.size()) + " 台）") | dim);
-        break;
-      }
-      body.push_back(RenderHostSection(host, host_output, tail_lines));
-      body.push_back(separatorEmpty());
-    }
-
-    if (!output.stderr_lines.empty()) {
-      Elements errors;
-      size_t start = output.stderr_lines.size() > tail_lines
-                         ? output.stderr_lines.size() - tail_lines
-                         : 0;
-      if (start > 0) errors.push_back(text("  … 更早 stderr") | dim);
-      for (size_t i = start; i < output.stderr_lines.size(); ++i) {
-        errors.push_back(paragraph(output.stderr_lines[i]) | color(Color::Red));
-      }
-      body.push_back(text("stderr / dsh 诊断") | bold | color(Color::Red));
-      body.push_back(vbox(std::move(errors)));
-    }
-
-    if (output.running) {
-      auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                         std::chrono::steady_clock::now() - output.started_at).count();
-      body.push_back(text("执行中… " + std::to_string(elapsed) + "s") | color(Color::Yellow));
-    } else if (output.completed) {
-      Color status_color = output.exit_code == 0 ? Color::Green : Color::Red;
-      body.push_back(text("退出码 " + std::to_string(output.exit_code) +
-                          (output.signaled ? " (signal)" : "")) | bold | color(status_color));
+    for (const auto& todo : todos) {
+      std::string mark = todo.status == "completed" ? "✓" : todo.status == "in_progress" ? "▶" : "○";
+      Color tint = todo.status == "completed" ? Color::Green
+                                               : todo.status == "in_progress" ? Color::Yellow : Color::GrayDark;
+      lines.push_back(hbox({text(mark + " ") | color(tint), paragraph(todo.content) | color(tint)}));
     }
   }
-  return vbox(std::move(body)) | yframe | flex;
+  return vbox(std::move(lines));
 }
 
-int RunOnce(const DshInvocation& invocation) {
-  if (invocation.command.empty()) {
-    std::cerr << "dsh_tui: --command is required for --run-once\n";
-    return 2;
+Element StatsPanel(const DeepSeekState& state) {
+  const TokenStats& stats = state.stats;
+  double pressure = stats.context_window > 0
+                        ? 100.0 * static_cast<double>(stats.surface_tokens) /
+                              static_cast<double>(stats.context_window)
+                        : 0.0;
+
+  Elements lines;
+  lines.push_back(text("会话") | bold | color(Color::Cyan));
+  lines.push_back(hbox({text("状态: "), text(state.running ? "● 运行中" : "○ 空闲") |
+                                          color(state.running ? Color::Yellow : Color::Green)}));
+  lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
+  lines.push_back(text("模型: " + state.provider + " / " + state.model));
+  lines.push_back(text("目录: " + state.cwd));
+
+  lines.push_back(separatorEmpty());
+  lines.push_back(text("Token") | bold | color(Color::Cyan));
+  lines.push_back(text("输入: " + std::to_string(stats.input_tokens)));
+  lines.push_back(text("输出: " + std::to_string(stats.output_tokens)));
+  lines.push_back(text("缓存读: " + std::to_string(stats.cache_read_tokens)));
+  lines.push_back(text("缓存写: " + std::to_string(stats.cache_write_tokens)));
+  if (stats.context_window > 0) {
+    lines.push_back(text("上下文: " + std::to_string(stats.surface_tokens) + " / " +
+                         std::to_string(stats.context_window) + " (" +
+                         std::to_string(static_cast<int>(pressure)) + "%)"));
   }
-  std::string error;
-  DshProcess process = SpawnDsh(invocation, error);
-  if (process.pid <= 0) {
-    std::cerr << "dsh_tui: " << error << "\n";
-    return 1;
-  }
 
-  auto set_nonblocking = [](int fd) {
-    int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags >= 0) (void)::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-  };
-  set_nonblocking(process.stdout_fd);
-  set_nonblocking(process.stderr_fd);
+  lines.push_back(separatorEmpty());
+  lines.push_back(text("会话统计") | bold | color(Color::Cyan));
+  lines.push_back(text("回合: " + std::to_string(stats.turns) + " · 步骤: " + std::to_string(stats.steps)));
+  lines.push_back(text("LLM: " + FormatMs(stats.llm_ms)));
+  lines.push_back(text("工具: " + FormatMs(stats.tool_ms)));
+  lines.push_back(text("首 token: " + FormatMs(stats.ttft_ms)));
+  lines.push_back(text("解码: " + FormatMs(stats.decode_ms)));
 
-  int exit_code = 1;
-  bool child_done = false;
-  bool stdout_eof = false;
-  bool stderr_eof = false;
-  while (true) {
-    if (!child_done) {
-      int status = 0;
-      pid_t result = ::waitpid(process.pid, &status, WNOHANG);
-      if (result == process.pid) {
-        child_done = true;
-        exit_code = WIFEXITED(status) ? WEXITSTATUS(status)
-                                      : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1;
-      }
-    }
+  lines.push_back(separatorEmpty());
+  lines.push_back(text("待办") | bold | color(Color::Cyan));
+  lines.push_back(TodoPanel(state.todos));
+  return vbox(std::move(lines));
+}
 
-    pollfd descriptors[2] = {
-        {stdout_eof ? -1 : process.stdout_fd, static_cast<short>(POLLIN | POLLHUP), 0},
-        {stderr_eof ? -1 : process.stderr_fd, static_cast<short>(POLLIN | POLLHUP), 0},
+class DemoReader final : public executor::IBlockingIoWorker {
+ public:
+  DemoReader(executor::comm::MpscChannel<InboundEvent>* events, ftxui::App* screen)
+      : events_(events), screen_(screen) {}
+
+  void run(std::stop_token stop_token) override {
+    auto send = [&](InboundEvent event) {
+      if (events_ != nullptr) (void)events_->send_for(std::move(event), std::chrono::milliseconds(500));
+      if (screen_ != nullptr) screen_->PostEvent(Event::Custom);
     };
-    int ready = ::poll(descriptors, 2, child_done ? 120 : 100);
-    if (ready < 0 && errno != EINTR) break;
-
-    for (int index = 0; index < 2; ++index) {
-      int fd = index == 0 ? process.stdout_fd : process.stderr_fd;
-      bool& eof = index == 0 ? stdout_eof : stderr_eof;
-      if (fd < 0 || eof) continue;
-      char buffer[8192];
-      for (;;) {
-        ssize_t count = ::read(fd, buffer, sizeof(buffer));
-        if (count > 0) {
-          if (index == 0) std::fwrite(buffer, 1, static_cast<size_t>(count), stdout);
-          else std::fwrite(buffer, 1, static_cast<size_t>(count), stderr);
-          continue;
-        }
-        if (count == 0) eof = true;
-        break;
+    auto wait = [&](int ms) {
+      for (int i = 0; i < ms / 25 && !stop_token.stop_requested(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
       }
-    }
-    std::fflush(stdout);
-    std::fflush(stderr);
+    };
 
-    if (child_done && stdout_eof && stderr_eof) break;
+    InboundEvent workspaces;
+    workspaces.type = InboundEvent::Type::Workspaces;
+    workspaces.workspaces = {
+        {"ws1", "/home/linductor/dsh_tui", "dsh_tui", {"s1", "s2"}},
+        {"ws2", "/home/linductor/heyaki", "heyaki", {"s3"}},
+    };
+    send(std::move(workspaces));
+
+    InboundEvent sessions;
+    sessions.type = InboundEvent::Type::Sessions;
+    sessions.sessions = {
+        {"s1", "利用第三方库实现DSH的TUI", "/home/linductor/dsh_tui", "ws1"},
+        {"s2", "修复 CI", "/home/linductor/dsh_tui", "ws1"},
+        {"s3", "M2 联调", "/home/linductor/heyaki", "ws2"},
+    };
+    send(std::move(sessions));
+
+    InboundEvent hello;
+    hello.type = InboundEvent::Type::Hello;
+    hello.text = "s1";
+    hello.secondary = "demo-model";
+    hello.third = "demo-provider";
+    hello.detail = "/home/linductor/dsh_tui";
+    hello.flag = true;
+    send(std::move(hello));
+
+    InboundEvent history;
+    history.type = InboundEvent::Type::History;
+    history.history = {
+        {"user", "用第三方 TUI 组件做一个和 WebUI 相同视觉框架的 dsh 界面"},
+        {"assistant", "我会把会话、工作区、状态和 token 使用都放进三栏布局。"},
+    };
+    send(std::move(history));
+
+    InboundEvent stats;
+    stats.type = InboundEvent::Type::Stats;
+    stats.stats = TokenStats{1234, 567, 3456, 0, 1000000, 16000, 2, 5, 3000.0, 1200.0, 800.0, 2200.0};
+    send(std::move(stats));
+
+    InboundEvent todo;
+    todo.type = InboundEvent::Type::Todo;
+    todo.todos = {{"阅读 dsh-tui 协议", "completed"}, {"实现三栏布局", "in_progress"}, {"测试桥接", "pending"}};
+    send(std::move(todo));
+
+    InboundEvent status;
+    status.type = InboundEvent::Type::Status;
+    status.running = true;
+    send(status);
+
+    InboundEvent delta;
+    delta.type = InboundEvent::Type::Delta;
+    delta.text = "text";
+    delta.secondary = "这是演示：";
+    send(delta);
+    wait(250);
+    delta.secondary = "左侧是工作区/会话，右侧是状态面板，";
+    send(delta);
+    wait(250);
+    delta.secondary = "中间是流式对话。";
+    send(delta);
+    wait(400);
+
+    InboundEvent message;
+    message.type = InboundEvent::Type::Message;
+    message.text = "assistant";
+    message.secondary = "这是演示：左侧是工作区/会话，右侧是状态面板，中间是流式对话。";
+    send(std::move(message));
+
+    status.running = false;
+    send(status);
+    wait(2500);
+
+    InboundEvent bye;
+    bye.type = InboundEvent::Type::Bye;
+    bye.text = "demo finished";
+    send(std::move(bye));
+    if (events_ != nullptr) events_->close();
   }
 
-  ::close(process.stdout_fd);
-  ::close(process.stderr_fd);
-  return exit_code;
-}
+  void wakeup() noexcept override {}
+
+ private:
+  executor::comm::MpscChannel<InboundEvent>* events_;
+  ftxui::App* screen_;
+};
 
 int RunSelfTest() {
-  DshInvocation invocation;
-  invocation.dsh_binary = "/usr/bin/dsh";
-  invocation.target_mode = TargetMode::Machines;
-  invocation.machines = "node1, user@node2";
-  invocation.remote_shell = "ssh";
-  invocation.remote_shell_options = {"BatchMode=yes", "ConnectTimeout=5"};
-  invocation.run_mode = RunMode::ForkLimit;
-  invocation.fork_limit = 8;
-  invocation.show_machine_names = true;
-  invocation.command = "hostname";
-
-  std::vector<std::string> expected = {
-      "/usr/bin/dsh", "-m", "node1, user@node2", "-r", "ssh",
-      "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-      "-c", "-F", "8", "-M", "--", "hostname"};
-  if (BuildDshArgv(invocation) != expected) {
-    std::cerr << "argv assertion failed\n";
+  std::vector<std::string> samples = {
+      R"({"type":"workspaces","workspaces":[{"id":"w","path":"/tmp","title":"demo","sessionIds":["s"]}]})",
+      R"({"type":"sessions","sessions":[{"id":"s","title":"标题","cwd":"/tmp","workspaceId":"w"}]})",
+      R"({"type":"hello","sessionId":"s","model":"m","provider":"p","cwd":"/tmp","resumed":true})",
+      R"({"type":"history","messages":[{"role":"user","text":"你好"},{"role":"assistant","text":"你好！"}]})",
+      R"({"type":"status","status":"running"})",
+      R"({"type":"delta","part":"text","text":"流式"})",
+      R"({"type":"message","role":"assistant","text":"流式完成"})",
+      R"({"type":"stats","inputTokens":10,"outputTokens":5,"contextWindow":100,"surfaceTokens":20,"turns":1,"steps":2})",
+      R"({"type":"todo","todos":[{"content":"任务一","status":"in_progress"}]})",
+      R"({"type":"ask","requestId":"r1","questions":[{"id":"q1","header":"确认","question":"继续吗？","options":["是","否"]}]})",
+      R"({"type":"approval","requestId":"r2","toolName":"bash","reason":"执行命令"})",
+      R"({"type":"bye","reason":"ok"})",
+  };
+  DeepSeekState state;
+  for (const auto& sample : samples) {
+    auto json = Json::parse(sample);
+    if (!json.has_value()) { std::cerr << "json parse failed\n"; return 1; }
+    auto event = ParseInboundEvent(*json);
+    if (!event.has_value()) { std::cerr << "event parse failed\n"; return 1; }
+    state.Apply(*event);
+  }
+  if (state.workspaces.size() != 1 || state.sessions.size() != 1 || !state.resumed ||
+      state.stats.context_window != 100 || state.todos.size() != 1 ||
+      !state.ask.active || !state.approval.active) {
+    std::cerr << "state assertions failed\n";
     return 1;
   }
-
-  auto hosts = ResolveHosts(invocation);
-  if (hosts.size() != 2 || hosts[0] != "node1" || hosts[1] != "user@node2") {
-    std::cerr << "host split assertion failed\n";
+  OutboundCommand command;
+  command.type = "prompt";
+  command.text = "a\nb";
+  std::string wire = OutboundJson(command);
+  if (wire.find("\\n") == std::string::npos || Json::parse(wire) == std::nullopt) {
+    std::cerr << "outbound encoding failed\n";
     return 1;
   }
-
-  RunOutput output;
-  output.Start(invocation, hosts);
-  RunnerEvent event;
-  event.type = RunnerEvent::Type::StdoutLine;
-  event.text = "node1: linux";
-  output.Apply(event);
-  event.text = "user@node2: linux";
-  output.Apply(event);
-  event.type = RunnerEvent::Type::StderrLine;
-  event.text = "warning";
-  output.Apply(event);
-  event.type = RunnerEvent::Type::ProcessExit;
-  event.exit_code = 0;
-  output.Apply(event);
-
-  if (!output.completed || output.exit_code != 0 || output.hosts.size() != 2 ||
-      output.hosts["node1"].lines.size() != 1 || output.stderr_lines.size() != 1) {
-    std::cerr << "output state assertion failed\n";
-    return 1;
-  }
-
   std::cout << "dsh_tui self-test ok\n";
   return 0;
 }
 
-int RunTui(const std::string& dsh_binary) {
-  const DshConfigDefaults defaults = LoadDshConfig();
+int RunChildMode() {
+  if (!FdIsUsable(kEventFd) || !FdIsUsable(kCommandFd)) {
+    std::cerr << "dsh_tui: child mode requires protocol pipes on fd 3 and fd 4.\n"
+              << "Run it through `npx @deepseek-ai/dsh --profile tui`, or use --demo / --self-test.\n";
+    return 2;
+  }
 
   executor::Executor executor;
   executor::ExecutorConfig executor_config;
@@ -289,392 +336,378 @@ int RunTui(const std::string& dsh_binary) {
     return 2;
   }
 
-  // Form state.
-  std::string command;
-  std::string machines;
-  std::string group;
-  std::string file;
-  std::string remote_shell = defaults.remote_shell;
-  std::string remote_options = JoinOptions(defaults.remote_shell_options);
-  std::string fork_limit_text = defaults.fork_limit > 0 ? std::to_string(defaults.fork_limit) : "";
-  int target_mode = static_cast<int>(TargetMode::Machines);
-  int run_mode = defaults.wait_shell ? static_cast<int>(RunMode::Wait)
-                                     : defaults.fork_limit > 0
-                                           ? static_cast<int>(RunMode::ForkLimit)
-                                           : static_cast<int>(RunMode::Concurrent);
-  bool show_machine_names = true;
-  bool verbose = defaults.verbose;
+  executor::comm::ChannelOptions channel_options;
+  channel_options.capacity = 4096;
+  channel_options.drop_policy = executor::comm::DropPolicy::RejectNewest;
+  channel_options.name = "dsh-tui-events";
+  executor::comm::MpscChannel<InboundEvent> events(channel_options);
 
-  std::vector<std::string> target_entries = {"机器列表 (-m)", "组 (-g)", "全部 (-a)", "文件 (-f)"};
-  std::vector<std::string> run_entries = {"并发 (-c)", "顺序等待 (-w)", "并发+限制 (-F)"};
-
-  RunOutput output;
-  std::vector<std::string> preview_hosts;
-  std::string preview_key;
-  std::unique_ptr<executor::comm::MpscChannel<RunnerEvent>> run_events;
-  executor::WorkerHandle run_handle;
-
+  DeepSeekState state;
+  std::string input_text;
   auto screen = ftxui::App::Fullscreen();
   screen.ForceHandleCtrlC(true);
 
-  auto StopRun = [&] {
-    if (run_handle.started()) run_handle.request_stop();
+  auto worker = std::make_unique<BridgeReader>(kEventFd, &events, &screen);
+  executor::BlockingWorkerSpec spec;
+  spec.name = "dsh-tui-bridge-reader";
+  spec.config.thread_name = "dsh-tui-bridge";
+  spec.worker = std::move(worker);
+  executor::WorkerHandle worker_handle = executor.start_worker(std::move(spec));
+  if (!worker_handle.started()) {
+    std::cerr << "dsh_tui: failed to start bridge reader: "
+              << worker_handle.start_result().message << "\n";
+    executor.shutdown(false);
+    return 2;
+  }
+
+  std::vector<std::string> workspace_entries;
+  std::vector<std::string> session_entries;
+  int workspace_selected = 0;
+  int session_selected = 0;
+
+  auto RebuildWorkspaceMenu = [&] {
+    workspace_entries.clear();
+    for (const auto& workspace : state.workspaces) {
+      workspace_entries.push_back(workspace.title.empty() ? workspace.path : workspace.title);
+    }
+    if (workspace_selected >= static_cast<int>(workspace_entries.size())) {
+      workspace_selected = workspace_entries.empty() ? 0 : static_cast<int>(workspace_entries.size()) - 1;
+    }
   };
 
-  auto DrainRunEvents = [&] {
-    if (!run_events) return;
-    RunnerEvent event;
-    while (run_events->try_receive(event)) {
-      output.Apply(event);
-    }
-    if (run_events->is_closed() && run_events->empty() && output.running) {
-      output.running = false;
-      output.completed = true;
-      if (output.exit_code < 0) output.exit_code = 130;
-    }
-  };
-
-  auto RunAction = [&] {
-    if (output.running) return;
-
-    if (run_handle.started()) {
-      run_handle.request_stop();
-      run_handle.stop();
-      run_handle = executor::WorkerHandle{};
-    }
-
-    DshInvocation invocation;
-    invocation.dsh_binary = dsh_binary;
-    invocation.target_mode = static_cast<TargetMode>(target_mode);
-    invocation.machines = machines;
-    invocation.group = group;
-    invocation.file = file;
-    invocation.remote_shell = Trim(remote_shell);
-    invocation.remote_shell_options = SplitOptions(remote_options);
-    invocation.run_mode = static_cast<RunMode>(run_mode);
-    invocation.show_machine_names = show_machine_names;
-    invocation.verbose = verbose;
-    invocation.command = Trim(command);
-    if (!invocation.remote_shell.empty() && invocation.remote_shell != "ssh" &&
-        invocation.remote_shell != "rsh" && invocation.remote_shell[0] == '-') {
-      invocation.remote_shell.clear();
-    }
-
-    int fork_limit = 0;
-    if (invocation.run_mode == RunMode::ForkLimit) {
-      try {
-        fork_limit = std::max(0, std::stoi(Trim(fork_limit_text)));
-      } catch (...) {
-        fork_limit = 0;
+  auto RebuildSessionMenu = [&] {
+    session_entries.clear();
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      const auto& workspace = state.workspaces[workspace_selected];
+      for (const auto& id : workspace.session_ids) {
+        const SessionInfo* session = state.FindSession(id);
+        session_entries.push_back(session == nullptr ? ShortId(id, 16) : state.SessionDisplayName(id));
+      }
+    } else if (state.workspaces.empty()) {
+      for (const auto& session : state.sessions) {
+        session_entries.push_back(state.SessionDisplayName(session.id));
       }
     }
-    invocation.fork_limit = fork_limit;
+    if (session_entries.empty()) session_entries.push_back("（无会话）");
+    if (session_selected >= static_cast<int>(session_entries.size())) session_selected = 0;
+  };
 
-    std::string problem;
-    if (invocation.command.empty()) problem = "命令不能为空";
-    else if (invocation.target_mode == TargetMode::Machines && Trim(machines).empty())
-      problem = "机器列表不能为空";
-    else if (invocation.target_mode == TargetMode::Group && Trim(group).empty())
-      problem = "组名不能为空";
-    else if (invocation.target_mode == TargetMode::File && Trim(file).empty())
-      problem = "机器文件路径不能为空";
-    if (!problem.empty()) {
-      output.Clear();
-      output.command = invocation.command;
-      output.target_summary = TargetSummary(invocation);
-      output.completed = true;
-      output.exit_code = 1;
-      output.spawn_error = problem;
-      return;
+  MenuOption workspace_option = MenuOption::Vertical();
+  workspace_option.on_change = [&] { RebuildSessionMenu(); };
+  workspace_option.on_enter = [&] { /* selection updates session list */ };
+  auto workspace_menu = Menu(&workspace_entries, &workspace_selected, workspace_option);
+
+  MenuOption session_option = MenuOption::Vertical();
+  session_option.on_enter = [&] {
+    std::string session_id;
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      const auto& workspace = state.workspaces[workspace_selected];
+      if (session_selected >= 0 && session_selected < static_cast<int>(workspace.session_ids.size())) {
+        session_id = workspace.session_ids[session_selected];
+      }
+    } else if (state.workspaces.empty() &&
+               session_selected >= 0 && session_selected < static_cast<int>(state.sessions.size())) {
+      session_id = state.sessions[session_selected].id;
     }
+    if (session_id.empty()) return;
+    OutboundCommand command;
+    command.type = "resume-session";
+    command.text = session_id;
+    SendCommand(kCommandFd, command);
+    input_text.clear();
+  };
+  auto session_menu = Menu(&session_entries, &session_selected, session_option);
 
-    auto hosts = ResolveHosts(invocation);
-    output.Start(invocation, hosts);
-
-    std::string spawn_error;
-    DshProcess process = SpawnDsh(invocation, spawn_error);
-    if (process.pid <= 0) {
-      output.MarkSpawnError(spawn_error.empty() ? "dsh 启动失败" : spawn_error);
-      return;
-    }
-
-    executor::comm::ChannelOptions options;
-    options.capacity = 8192;
-    options.drop_policy = executor::comm::DropPolicy::RejectNewest;
-    options.name = "dsh-run-output";
-    run_events = std::make_unique<executor::comm::MpscChannel<RunnerEvent>>(options);
-
-    executor::BlockingWorkerSpec spec;
-    spec.name = "dsh-run-reader";
-    spec.config.thread_name = "dsh-run-reader";
-    spec.worker = std::make_unique<DshProcessWorker>(process, run_events.get(), &screen);
-    run_handle = executor.start_worker(std::move(spec));
-    if (!run_handle.started()) {
-      output.MarkSpawnError("dsh 输出读取线程启动失败: " + run_handle.start_result().message);
-      run_handle = executor::WorkerHandle{};
-      run_events.reset();
+  auto Send = [&](const OutboundCommand& command) {
+    if (!SendCommand(kCommandFd, command)) {
+      state.Add(MessageRole::Error, "无法写入 dsh 桥接进程，连接可能已断开。");
     }
   };
 
-  InputOption command_option = InputOption::Spacious();
-  command_option.multiline = false;
-  command_option.on_enter = RunAction;
-  auto input_command = Input(&command, "远程命令，例如：hostname; uptime", command_option);
+  auto DrainEvents = [&] {
+    InboundEvent event;
+    while (events.try_receive(event)) {
+      state.Apply(event);
+      if (event.type == InboundEvent::Type::Workspaces || event.type == InboundEvent::Type::Sessions) {
+        RebuildWorkspaceMenu();
+        RebuildSessionMenu();
+      }
+      if (event.type == InboundEvent::Type::Bye) {
+        state.closed = true;
+        screen.Exit();
+      }
+    }
+    if (events.is_closed() && events.empty() && !state.closed) state.closed = true;
+  };
 
-  InputOption single_line;
-  single_line.multiline = false;
-  auto input_machines = Input(&machines, "node1,node2 或 user@node1", single_line);
-  auto input_group = Input(&group, "组名", single_line);
-  auto input_file = Input(&file, "~/machines.list", single_line);
-  auto input_shell = Input(&remote_shell, "ssh / rsh / 可执行文件路径", single_line);
-  auto input_options = Input(&remote_options, "BatchMode=yes,ConnectTimeout=5（逗号分隔，逐个传给 -o）", single_line);
-  auto input_fork = Input(&fork_limit_text, "例如 16", single_line);
+  auto AnswerCurrentQuestion = [&] {
+    if (!state.ask.active || state.ask.index >= state.ask.questions.size()) return;
+    const Question& question = state.ask.questions[state.ask.index];
+    std::string answer = Trim(input_text);
 
-  auto target_radio = Radiobox(&target_entries, &target_mode);
-  auto run_radio = Radiobox(&run_entries, &run_mode);
-  auto checkbox_names = Checkbox("按主机分行显示输出 (-M)", &show_machine_names);
-  auto checkbox_verbose = Checkbox("verbose (-v)", &verbose);
-  auto button_run = Button("执行 (Ctrl+R)", RunAction);
+    OutboundCommand command;
+    command.type = "answer";
+    command.request_id = state.ask.request_id;
+    command.item_id = question.id;
 
-  auto form = Container::Vertical({
-      target_radio,
-      input_machines,
-      input_group,
-      input_file,
-      input_shell,
-      input_options,
-      run_radio,
-      input_fork,
-      checkbox_names,
-      checkbox_verbose,
-  });
-  auto bottom = Container::Horizontal({input_command, button_run});
-  auto root = Container::Vertical({form, bottom});
-
-  size_t tail_lines = 12;
-
-  auto renderer = Renderer(root, [&] {
-    Element target_input;
-    switch (static_cast<TargetMode>(target_mode)) {
-      case TargetMode::Machines:
-        target_input = hbox({text("机器列表: "), input_machines->Render() | flex});
-        break;
-      case TargetMode::Group:
-        target_input = hbox({text("组名: "), input_group->Render() | flex});
-        break;
-      case TargetMode::All:
-        target_input = hbox({text("全部机器 (-a)"), filler()});
-        break;
-      case TargetMode::File:
-        target_input = hbox({text("机器文件: "), input_file->Render() | flex});
-        break;
+    if (!question.options.empty()) {
+      bool matched = false;
+      if (!answer.empty()) {
+        char* end = nullptr;
+        long choice = std::strtol(answer.c_str(), &end, 10);
+        if (end != answer.c_str() && *end == '\0' && choice >= 1 &&
+            static_cast<size_t>(choice) <= question.options.size()) {
+          command.selected = {question.options[static_cast<size_t>(choice - 1)]};
+          matched = true;
+        } else {
+          for (const auto& option : question.options) {
+            if (option == answer) { command.selected = {option}; matched = true; break; }
+          }
+        }
+      }
+      if (!matched) {
+        if (answer.empty()) command.selected = {question.options.front()};
+        else command.custom = answer;
+      }
+    } else if (!answer.empty()) {
+      command.custom = answer;
     }
 
-    Elements form_lines;
-    form_lines.push_back(text("目标") | bold | color(Color::Cyan));
-    form_lines.push_back(target_radio->Render() | yframe);
-    form_lines.push_back(target_input);
-    form_lines.push_back(separatorEmpty());
-    form_lines.push_back(text("远程 shell") | bold | color(Color::Cyan));
-    form_lines.push_back(hbox({text("shell: "), input_shell->Render() | flex}));
-    form_lines.push_back(hbox({text("选项: "), input_options->Render() | flex}));
-    form_lines.push_back(separatorEmpty());
-    form_lines.push_back(text("执行模式") | bold | color(Color::Cyan));
-    form_lines.push_back(run_radio->Render() | yframe);
-    if (static_cast<RunMode>(run_mode) == RunMode::ForkLimit) {
-      form_lines.push_back(hbox({text("fork 上限: "), input_fork->Render() | flex}));
-    }
-    form_lines.push_back(separatorEmpty());
-    form_lines.push_back(checkbox_names->Render());
-    form_lines.push_back(checkbox_verbose->Render());
-    form_lines.push_back(filler());
+    ++state.ask.index;
+    if (state.ask.index >= state.ask.questions.size()) state.ask.active = false;
+    Send(command);
+  };
 
-    Element form_panel = vbox(std::move(form_lines)) | border;
+  auto AnswerApproval = [&] {
+    if (!state.approval.active) return;
+    std::string answer = Trim(input_text);
+    OutboundCommand command;
+    command.type = "approval";
+    command.request_id = state.approval.request_id;
+    command.text = (answer == "n" || answer == "N" || answer == "no" ||
+                    answer == "拒绝" || answer == "reject") ? "rejected" : "allowed-once";
+    state.approval.active = false;
+    Send(command);
+  };
 
-    auto status = output.running
-                      ? "运行中"
-                      : output.completed ? "已完成" : "就绪";
-    Color status_color = output.running ? Color::Yellow
-                                        : output.completed
-                                              ? (output.exit_code == 0 ? Color::Green : Color::Red)
-                                              : Color::Cyan;
-
-    Element header = hbox({
-        text(" dsh TUI ") | bold | color(Color::Cyan),
-        text("  " + dsh_binary) | dim,
-        filler(),
-        text(status) | bold | color(status_color),
-    });
-
-    std::string current_preview_key =
-        std::to_string(target_mode) + "|" + machines + "|" + group + "|" + file;
-    if (current_preview_key != preview_key) {
-      DshInvocation preview_invocation;
-      preview_invocation.target_mode = static_cast<TargetMode>(target_mode);
-      preview_invocation.machines = machines;
-      preview_invocation.group = group;
-      preview_invocation.file = file;
-      preview_hosts = ResolveHosts(preview_invocation);
-      preview_key = current_preview_key;
-    }
-
-    Elements preview;
-    preview.push_back(text("目标主机预览 (" + std::to_string(preview_hosts.size()) + " 台)") | bold);
-    if (preview_hosts.empty()) {
-      preview.push_back(text("（未找到主机列表；dsh 会报告错误）") | dim);
+  auto NewSessionInWorkspace = [&] {
+    OutboundCommand command;
+    command.type = "new-session";
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      command.text = state.workspaces[workspace_selected].id;
     } else {
-      std::string joined;
-      for (size_t i = 0; i < preview_hosts.size() && i < 16; ++i) {
-        if (i != 0) joined += ", ";
-        joined += preview_hosts[i];
-      }
-      if (preview_hosts.size() > 16) joined += " …";
-      preview.push_back(paragraph(joined));
+      command.text = "";
     }
+    Send(command);
+    input_text.clear();
+  };
 
-    Element output_panel = vbox({
-        hbox({
-            text("执行结果") | bold,
-            filler(),
-            text("PgUp/PgDn 显示行数: " + std::to_string(tail_lines)) | dim,
-        }),
-        separator(),
-        RenderOutputPanel(output, tail_lines, 12),
-    }) | border | flex;
+  auto Submit = [&] {
+    if (state.closed || !state.hello_seen) return;
+    if (state.approval.active) AnswerApproval();
+    else if (state.ask.active) AnswerCurrentQuestion();
+    else {
+      std::string prompt = Trim(input_text);
+      if (prompt.empty()) return;
+      OutboundCommand command;
+      command.type = "prompt";
+      command.text = std::move(prompt);
+      Send(command);
+    }
+    input_text.clear();
+  };
 
-    Element main_area = hbox({
-        form_panel | size(WIDTH, EQUAL, 42),
-        separator(),
-        vbox({
-            vbox(std::move(preview)) | border,
-            output_panel | flex,
-        }) | flex,
-    }) | flex;
+  InputOption input_option = InputOption::Spacious();
+  input_option.multiline = false;
+  input_option.on_enter = Submit;
+  auto input_component = Input(&input_text, "输入消息，Enter 发送", input_option);
+  auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
 
-    Element command_row = hbox({
-        text("命令: ") | bold,
-        input_command->Render() | flex,
-        button_run->Render(),
-    });
+  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu});
+  auto main_container = Container::Vertical({input_component});
+  auto root_container = Container::Horizontal({sidebar_container, main_container});
 
-    return vbox({
-        header,
-        separator(),
-        main_area,
-        separator(),
-        command_row,
-        hbox({
-            text("Enter 执行  ·  Tab 切换字段  ·  Esc/Ctrl+C 停止  ·  Ctrl+Q 退出") | dim,
-            filler(),
-            text("dsh_tui " + std::string(kVersion.substr(8))) | dim,
-        }),
-    }) | border;
+  auto renderer = Renderer(root_container, [&] {
+    // Sidebar.
+    Elements sidebar;
+    sidebar.push_back(text("工作区") | bold | color(Color::Cyan));
+    if (state.workspaces.empty()) {
+      sidebar.push_back(text("（等待 dsh 工作区数据…）") | dim);
+    } else {
+      sidebar.push_back(workspace_menu->Render() | yframe);
+      sidebar.push_back(text(" " + state.workspaces[workspace_selected].path) | dim);
+    }
+    sidebar.push_back(separatorEmpty());
+    sidebar.push_back(new_session_button->Render());
+    sidebar.push_back(separatorEmpty());
+    sidebar.push_back(text("会话") | bold | color(Color::Cyan));
+    sidebar.push_back(session_menu->Render() | yframe | flex);
+    Element sidebar_panel = vbox(std::move(sidebar)) | border | size(WIDTH, EQUAL, 34);
+
+    // Main conversation.
+    Elements messages;
+    size_t start = state.messages.size() > state.visible_messages
+                       ? state.messages.size() - state.visible_messages : 0;
+    for (size_t i = start; i < state.messages.size(); ++i) {
+      messages.push_back(RenderMessage(state.messages[i]));
+      if (i + 1 < state.messages.size()) messages.push_back(separatorEmpty());
+    }
+    if (messages.empty()) messages.push_back(text("（暂无消息）") | dim | center);
+
+    Element question_panel = QuestionPanel(state);
+    Elements main_lines;
+    main_lines.push_back(hbox({
+        text(" DeepSeek Harness ") | bold | color(Color::Cyan),
+        filler(),
+        text(state.running ? "● 运行中" : "○ 空闲") |
+            color(state.running ? Color::Yellow : Color::Green),
+        filler(),
+        text(state.session_id.empty() ? "未连接" : "session " + ShortId(state.session_id)) | dim,
+    }));
+    main_lines.push_back(separator());
+    main_lines.push_back(vbox(std::move(messages)) | vscroll_indicator | yframe | flex);
+    if (state.ask.active || state.approval.active) {
+      main_lines.push_back(separator());
+      main_lines.push_back(question_panel);
+    }
+    main_lines.push_back(separator());
+    main_lines.push_back(hbox({
+        text("❯ ") | bold | color(Color::Cyan),
+        input_component->Render() | flex,
+    }));
+    main_lines.push_back(hbox({
+        text("Enter 发送 · Esc 停止 · Ctrl+N 新建会话 · PgUp/PgDn 历史 · Ctrl+Q 退出") | dim,
+        filler(),
+        text("dsh_tui " + std::string(kVersion.substr(8))) | dim,
+    }));
+    Element main_panel = vbox(std::move(main_lines)) | border | flex;
+
+    // Status rail, mirroring the WebUI right-side inspector.
+    Element status_panel = StatsPanel(state) | border | size(WIDTH, EQUAL, 40);
+
+    return hbox({sidebar_panel, separator(), main_panel, separator(), status_panel}) | border;
   });
 
   auto main_component = CatchEvent(renderer, [&](Event event) {
-    if (event == Event::Custom) {
-      DrainRunEvents();
-      return true;
-    }
-    if (event == Event::CtrlR) {
-      RunAction();
-      return true;
-    }
+    if (event == Event::Custom) { DrainEvents(); return true; }
     if (event == Event::CtrlQ) {
-      StopRun();
-      screen.Exit();
-      return true;
+      OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
     }
     if (event == Event::CtrlC || event == Event::Escape) {
-      if (output.running) StopRun();
+      if (state.running) { OutboundCommand command; command.type = "cancel"; Send(command); }
       return true;
     }
+    if (event == Event::CtrlN) { NewSessionInWorkspace(); return true; }
     if (event == Event::PageUp) {
-      tail_lines = std::min<size_t>(tail_lines + 10, 200);
-      return true;
+      state.visible_messages = std::min<size_t>(state.visible_messages + 20, 600); return true;
     }
     if (event == Event::PageDown) {
-      tail_lines = tail_lines > 10 ? tail_lines - 10 : 5;
-      return true;
+      state.visible_messages = state.visible_messages > 20 ? state.visible_messages - 20 : 10; return true;
     }
     return false;
   });
 
-  input_command->TakeFocus();
+  DrainEvents();
+  input_component->TakeFocus();
   screen.Loop(main_component);
 
-  StopRun();
-  if (run_handle.started()) run_handle.stop();
+  worker_handle.request_stop();
+  worker_handle.stop();
   executor.shutdown(true);
+  return 0;
+}
+
+int RunDemoMode() {
+  if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+    std::cout << "dsh_tui demo (no TTY):\n"
+              << "工作区: dsh_tui (/home/linductor/dsh_tui)\n"
+              << "会话: 利用第三方库实现DSH的TUI\n"
+              << "[你] 用第三方 TUI 组件做一个和 WebUI 相同视觉框架的 dsh 界面\n"
+              << "[dsh] 我会把会话、工作区、状态和 token 使用都放进三栏布局。\n";
+    return 0;
+  }
+
+  executor::Executor executor;
+  executor::ExecutorConfig executor_config;
+  executor_config.min_threads = 1;
+  executor_config.max_threads = 2;
+  if (!executor.initialize(executor_config)) { std::cerr << "executor init failed\n"; return 2; }
+
+  executor::comm::ChannelOptions options;
+  options.capacity = 256;
+  options.name = "dsh-tui-demo";
+  executor::comm::MpscChannel<InboundEvent> events(options);
+  DeepSeekState state;
+  auto screen = ftxui::App::Fullscreen();
+  screen.ForceHandleCtrlC(true);
+
+  auto worker = std::make_unique<DemoReader>(&events, &screen);
+  executor::BlockingWorkerSpec spec;
+  spec.name = "dsh-tui-demo";
+  spec.config.thread_name = "dsh-tui-demo";
+  spec.worker = std::move(worker);
+  executor::WorkerHandle handle = executor.start_worker(std::move(spec));
+  if (!handle.started()) { std::cerr << handle.start_result().message << "\n"; return 2; }
+
+  auto renderer = Renderer([&] {
+    InboundEvent event;
+    while (events.try_receive(event)) {
+      state.Apply(event);
+      if (event.type == InboundEvent::Type::Bye) screen.Exit();
+    }
+    Elements messages;
+    size_t start = state.messages.size() > 40 ? state.messages.size() - 40 : 0;
+    for (size_t i = start; i < state.messages.size(); ++i) messages.push_back(RenderMessage(state.messages[i]));
+    return hbox({
+        vbox({text("工作区") | bold, text(state.workspaces.empty() ? "-" : state.workspaces[0].title)}) |
+            border | size(WIDTH, EQUAL, 30),
+        separator(),
+        vbox({text(" DeepSeek Harness demo ") | bold | center | color(Color::Cyan),
+              separator(),
+              vbox(std::move(messages)) | vscroll_indicator | yframe | flex,
+              separator(),
+              text("Ctrl+Q 退出") | dim | center}) | border | flex,
+        separator(),
+        StatsPanel(state) | border | size(WIDTH, EQUAL, 38),
+    }) | border;
+  });
+  auto component = CatchEvent(renderer, [&](Event event) {
+    if (event == Event::Custom) {
+      InboundEvent message;
+      while (events.try_receive(message)) {
+        state.Apply(message);
+        if (message.type == InboundEvent::Type::Bye) screen.Exit();
+      }
+      return true;
+    }
+    if (event == Event::CtrlQ || event == Event::Escape) { screen.Exit(); return true; }
+    return false;
+  });
+  screen.Loop(component);
+  handle.request_stop(); handle.stop(); executor.shutdown(true);
   return 0;
 }
 
 }  // namespace
 
 int Main(int argc, char** argv) {
-  DshInvocation invocation;
-  invocation.dsh_binary = DefaultDshBinary();
+  bool child_mode = false;
+  bool demo_mode = false;
   bool self_test = false;
-  bool run_once = false;
-
-  auto take_value = [&](int& index) -> std::string {
-    if (index + 1 >= argc) {
-      std::cerr << "dsh_tui: " << argv[index] << " needs a value\n";
-      std::exit(2);
-    }
-    return argv[++index];
-  };
-
   for (int i = 1; i < argc; ++i) {
     std::string_view arg = argv[i];
-    if (arg == "--dsh") {
-      invocation.dsh_binary = take_value(i);
-    } else if (arg == "--run-once") {
-      run_once = true;
-    } else if (arg == "--machines") {
-      invocation.target_mode = TargetMode::Machines;
-      invocation.machines = take_value(i);
-    } else if (arg == "--group") {
-      invocation.target_mode = TargetMode::Group;
-      invocation.group = take_value(i);
-    } else if (arg == "--all") {
-      invocation.target_mode = TargetMode::All;
-    } else if (arg == "--file") {
-      invocation.target_mode = TargetMode::File;
-      invocation.file = take_value(i);
-    } else if (arg == "--command") {
-      invocation.command = take_value(i);
-    } else if (arg == "--shell") {
-      invocation.remote_shell = take_value(i);
-    } else if (arg == "--shell-options") {
-      invocation.remote_shell_options = SplitOptions(take_value(i));
-    } else if (arg == "--wait") {
-      invocation.run_mode = RunMode::Wait;
-    } else if (arg == "--fork") {
-      invocation.run_mode = RunMode::ForkLimit;
-      try { invocation.fork_limit = std::max(0, std::stoi(take_value(i))); } catch (...) {}
-    } else if (arg == "--no-names") {
-      invocation.show_machine_names = false;
-    } else if (arg == "--verbose") {
-      invocation.verbose = true;
-    } else if (arg == "--self-test") {
-      self_test = true;
-    } else if (arg == "--help" || arg == "-h") {
-      PrintUsage();
-      return 0;
-    } else if (arg == "--version" || arg == "-V") {
-      std::cout << kVersion << "\n";
-      return 0;
-    } else {
-      std::cerr << "dsh_tui: unknown argument: " << arg << "\n\n";
-      PrintUsage();
-      return 2;
-    }
+    if (arg == "--child") child_mode = true;
+    else if (arg == "--demo") demo_mode = true;
+    else if (arg == "--self-test") self_test = true;
+    else if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
+    else if (arg == "--version" || arg == "-V") { std::cout << kVersion << "\n"; return 0; }
+    else { std::cerr << "dsh_tui: unknown argument: " << arg << "\n\n"; PrintUsage(); return 2; }
   }
-
   if (self_test) return RunSelfTest();
-  if (run_once) return RunOnce(invocation);
-  return RunTui(invocation.dsh_binary);
+  if (demo_mode) return RunDemoMode();
+  if (child_mode) return RunChildMode();
+  PrintUsage();
+  return 2;
 }
 
 }  // namespace dsh_tui

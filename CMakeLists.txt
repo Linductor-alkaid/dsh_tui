@@ -28,9 +28,9 @@ find_package(Threads REQUIRED)
 
 add_executable(dsh_tui
   src/main.cpp
-  src/dsh_config.cpp
-  src/dsh_runner.cpp
-  src/output_state.cpp
+  src/ds_state.cpp
+  src/ds_bridge.cpp
+  src/ds_protocol.cpp
 )
 
 target_include_directories(dsh_tui PRIVATE
