@@ -154,6 +154,7 @@ Element StatsPanel(const DeepSeekState& state) {
   lines.push_back(text("会话") | bold | color(Color::Cyan));
   lines.push_back(hbox({text("桥接: "),
                         text(BridgeStatusText(state)) | color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow)}));
+  if (!state.error.empty()) lines.push_back(paragraph(state.error) | color(Color::Red));
   lines.push_back(hbox({text("状态: "), text(state.running ? "● 运行中" : "○ 空闲") |
                                           color(state.running ? Color::Yellow : Color::Green)}));
   lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
@@ -329,7 +330,7 @@ int RunSelfTest() {
   return 0;
 }
 
-int RunBridgeLoop(int event_fd, int command_fd) {
+int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error = {}) {
   executor::Executor executor;
   executor::ExecutorConfig executor_config;
   executor_config.min_threads = 1;
@@ -349,20 +350,28 @@ int RunBridgeLoop(int event_fd, int command_fd) {
 
   DeepSeekState state;
   std::string input_text;
+  if (!launch_error.empty()) {
+    state.closed = true;
+    state.error = launch_error;
+    state.Add(MessageRole::Error, "桥接启动失败: " + launch_error);
+  }
+
   auto screen = ftxui::App::Fullscreen();
   screen.ForceHandleCtrlC(true);
 
-  auto worker = std::make_unique<BridgeReader>(event_fd, &events, &screen);
-  executor::BlockingWorkerSpec spec;
-  spec.name = "dsh-tui-bridge-reader";
-  spec.config.thread_name = "dsh-tui-bridge";
-  spec.worker = std::move(worker);
-  executor::WorkerHandle worker_handle = executor.start_worker(std::move(spec));
-  if (!worker_handle.started()) {
-    std::cerr << "dsh_tui: failed to start bridge reader: "
-              << worker_handle.start_result().message << "\n";
-    executor.shutdown(false);
-    return 2;
+  executor::WorkerHandle worker_handle;
+  if (event_fd >= 0) {
+    auto worker = std::make_unique<BridgeReader>(event_fd, &events, &screen);
+    executor::BlockingWorkerSpec spec;
+    spec.name = "dsh-tui-bridge-reader";
+    spec.config.thread_name = "dsh-tui-bridge";
+    spec.worker = std::move(worker);
+    worker_handle = executor.start_worker(std::move(spec));
+    if (!worker_handle.started()) {
+      state.closed = true;
+      state.error = worker_handle.start_result().message;
+      state.Add(MessageRole::Error, "桥接读取线程启动失败: " + state.error);
+    }
   }
 
   std::vector<std::string> workspace_entries;
@@ -665,8 +674,10 @@ int RunBridgeLoop(int event_fd, int command_fd) {
   input_component->TakeFocus();
   screen.Loop(main_component);
 
-  worker_handle.request_stop();
-  worker_handle.stop();
+  if (worker_handle.started()) {
+    worker_handle.request_stop();
+    worker_handle.stop();
+  }
   executor.shutdown(true);
   return 0;
 }
@@ -683,13 +694,11 @@ int RunChildMode() {
 int RunStandaloneMode(const std::string& resume_session_id) {
   std::string error;
   if (!EnsureTuiProfile(error)) {
-    std::cerr << "dsh_tui: " << error << "\n";
-    return 2;
+    return RunBridgeLoop(-1, -1, error);
   }
   BridgeProcess process = SpawnDeepSeekBridge(resume_session_id, error);
   if (process.pid <= 0) {
-    std::cerr << "dsh_tui: " << error << "\n";
-    return 2;
+    return RunBridgeLoop(-1, -1, error);
   }
   int code = RunBridgeLoop(process.event_fd, process.command_fd);
   ReapBridgeProcess(process);
