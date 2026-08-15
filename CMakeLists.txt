@@ -55,3 +55,10 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS dsh_tui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+enable_testing()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME bridge_roundtrip
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/bridge_roundtrip.py
+                 $<TARGET_FILE:dsh_tui>)
