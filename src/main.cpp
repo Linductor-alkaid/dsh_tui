@@ -628,6 +628,18 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   input_option.multiline = false;
   input_option.on_enter = Submit;
   auto input_component = Input(&input_text, "输入消息，Enter 发送", input_option);
+  // Intercept history-scrolling keys before the text input consumes them.
+  input_component |= CatchEvent([&](Event event) {
+    if (event == Event::Home) { stick_to_bottom = false; scroll_anchor = 0.0; return true; }
+    if (event == Event::End) { stick_to_bottom = true; scroll_anchor = 1.0; return true; }
+    if (event == Event::PageUp) { stick_to_bottom = false; scroll_anchor = std::max(0.0, scroll_anchor - 0.12); return true; }
+    if (event == Event::PageDown) {
+      scroll_anchor = std::min(1.0, scroll_anchor + 0.12);
+      if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
+      return true;
+    }
+    return false;
+  });
   auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
 
   auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, model_menu, reasoning_menu});
