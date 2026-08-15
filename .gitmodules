@@ -1,0 +1,6 @@
+[submodule "third_party/FTXUI"]
+path = third_party/FTXUI
+url = https://github.com/ArthurSonzogni/FTXUI.git
+[submodule "third_party/executor"]
+path = third_party/executor
+url = https://github.com/Linductor-alkaid/executor.git
