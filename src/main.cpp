@@ -678,8 +678,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (messages.empty()) messages.push_back(text("（暂无消息）") | dim | center);
 
     const float anchor = stick_to_bottom ? 1.0f : static_cast<float>(scroll_anchor);
-    Element history = vbox(std::move(messages)) | vscroll_indicator | yframe |
-                      focusPositionRelative(0.0f, anchor) | flex;
+    Element history = vbox(std::move(messages)) | focusPositionRelative(0.0f, anchor) |
+                      yframe | vscroll_indicator | flex;
 
     Element question_panel = QuestionPanel(state);
     Elements main_lines;
