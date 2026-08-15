@@ -166,8 +166,6 @@ Element StatsPanel(const DeepSeekState& state) {
   lines.push_back(hbox({text("状态: "), text(state.running ? "● 运行中" : "○ 空闲") |
                                           color(state.running ? Color::Yellow : Color::Green)}));
   lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
-  lines.push_back(text("模型: " + state.provider + " / " + state.model));
-  lines.push_back(text("思考深度: " + (state.reasoning_effort.empty() ? "默认" : state.reasoning_effort)));
   lines.push_back(text("目录: " + state.cwd));
 
   lines.push_back(separatorEmpty());

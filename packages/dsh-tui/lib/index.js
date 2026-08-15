@@ -239,7 +239,10 @@ export function apply(ctx, config) {
         for (const model of listed) {
           let resolved;
           try {
-            resolved = await llm.resolveModel?.(provider.id, model.id);
+            // LlmRuntime exposes the validated capability query as
+            // `resolveModelInfo`; `resolveModel` is the lower-level adapter
+            // method and is intentionally not part of the public service.
+            resolved = await llm.resolveModelInfo?.(provider.id, model.id);
           } catch {
             resolved = undefined;
           }
