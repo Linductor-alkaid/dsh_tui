@@ -191,6 +191,18 @@ BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
     (void)::setenv("DSH_TUI_PARENT", "1", 1);
     (void)::setenv("DSH_TUI_SOURCE_DIR", DSH_TUI_SOURCE_DIR, 1);
 
+    // The native frontend owns the terminal. Keep dsh/npx quiet so progress
+    // or install output cannot leak through the FTXUI frame. Set
+    // DSH_TUI_DEBUG=1 to keep the bridge's stdout/stderr for diagnosis.
+    if (std::getenv("DSH_TUI_DEBUG") == nullptr) {
+      int devnull = ::open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        (void)::dup2(devnull, STDOUT_FILENO);
+        (void)::dup2(devnull, STDERR_FILENO);
+        if (devnull > 2) ::close(devnull);
+      }
+    }
+
     std::vector<char*> raw_argv;
     raw_argv.reserve(argv.size() + 1);
     for (auto& arg : argv) raw_argv.push_back(arg.data());

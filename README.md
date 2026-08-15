@@ -48,6 +48,12 @@ cmake --build build -j
 ./scripts/run-tui.sh
 ```
 
+`dsh`/`npx` 的 stdout/stderr 会被静默，避免污染 TUI；需要诊断桥接进程时：
+
+```bash
+DSH_TUI_DEBUG=1 ./build/dsh_tui
+```
+
 也可以沿用 profile 启动方式（此时 dsh 反向 spawn 原生前端）：
 
 ```bash
