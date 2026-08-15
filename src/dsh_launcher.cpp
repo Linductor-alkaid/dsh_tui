@@ -212,8 +212,9 @@ bool EnsureTuiProfile(std::string& error) {
 
 BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
                                   std::string& error) {
-  if (std::getenv("DSH_BIN") == nullptr && !FindOnPath("npx")) {
-    error = "npx not found on PATH; install Node.js/npm or set DSH_BIN";
+  if (std::getenv("DSH_BIN") == nullptr && FindCachedDeepSeekLauncher().empty() &&
+      !FindOnPath("npx")) {
+    error = "DeepSeek Harness launcher not found; install it with `npx @deepseek-ai/dsh` or set DSH_BIN";
     return {};
   }
 
