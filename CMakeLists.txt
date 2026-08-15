@@ -28,9 +28,14 @@ find_package(Threads REQUIRED)
 
 add_executable(dsh_tui
   src/main.cpp
+  src/dsh_launcher.cpp
   src/ds_state.cpp
   src/ds_bridge.cpp
   src/ds_protocol.cpp
+)
+
+target_compile_definitions(dsh_tui PRIVATE
+  DSH_TUI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 target_include_directories(dsh_tui PRIVATE

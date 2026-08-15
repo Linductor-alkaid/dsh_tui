@@ -23,6 +23,7 @@
 #include "ftxui/dom/elements.hpp"
 
 #include "ds_bridge.hpp"
+#include "dsh_launcher.hpp"
 #include "ds_protocol.hpp"
 #include "ds_state.hpp"
 #include "executor/executor.hpp"
@@ -37,7 +38,9 @@ constexpr std::string_view kVersion = "dsh_tui 0.3.0";
 void PrintUsage() {
   std::cout
       << "dsh_tui — DeepSeek Harness WebUI 风格的终端界面\n\n"
-      << "通常由 `npx @deepseek-ai/dsh --profile tui` 启动，也可直接：\n"
+      << "直接运行 dsh_tui 时会自动初始化 profile、启动 DeepSeek Harness\n"
+      << "并完成桥接；也可以显式使用以下模式：\n"
+      << "  dsh_tui [--resume <id>]  # 自启 dsh，恢复指定会话\n"
       << "  dsh_tui --child          # 由 dsh-tui profile 桥接进程启动\n"
       << "  dsh_tui --demo           # 无 dsh 进程的可视化演示\n"
       << "  dsh_tui --self-test      # 无 TTY 的协议/状态自检\n"
@@ -70,6 +73,12 @@ std::string FormatMs(double value) {
     return out.str();
   }
   return std::to_string(static_cast<int64_t>(value)) + "ms";
+}
+
+std::string BridgeStatusText(const DeepSeekState& state) {
+  if (state.closed) return "✖ 桥接断开";
+  if (state.hello_seen) return "● 桥接已连接";
+  return "◌ 桥接中…";
 }
 
 Element RenderMessage(const ChatMessage& message) {
@@ -143,6 +152,8 @@ Element StatsPanel(const DeepSeekState& state) {
 
   Elements lines;
   lines.push_back(text("会话") | bold | color(Color::Cyan));
+  lines.push_back(hbox({text("桥接: "),
+                        text(BridgeStatusText(state)) | color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow)}));
   lines.push_back(hbox({text("状态: "), text(state.running ? "● 运行中" : "○ 空闲") |
                                           color(state.running ? Color::Yellow : Color::Green)}));
   lines.push_back(text("ID: " + ShortId(state.session_id, 14)));
@@ -318,13 +329,7 @@ int RunSelfTest() {
   return 0;
 }
 
-int RunChildMode() {
-  if (!FdIsUsable(kEventFd) || !FdIsUsable(kCommandFd)) {
-    std::cerr << "dsh_tui: child mode requires protocol pipes on fd 3 and fd 4.\n"
-              << "Run it through `npx @deepseek-ai/dsh --profile tui`, or use --demo / --self-test.\n";
-    return 2;
-  }
-
+int RunBridgeLoop(int event_fd, int command_fd) {
   executor::Executor executor;
   executor::ExecutorConfig executor_config;
   executor_config.min_threads = 1;
@@ -347,7 +352,7 @@ int RunChildMode() {
   auto screen = ftxui::App::Fullscreen();
   screen.ForceHandleCtrlC(true);
 
-  auto worker = std::make_unique<BridgeReader>(kEventFd, &events, &screen);
+  auto worker = std::make_unique<BridgeReader>(event_fd, &events, &screen);
   executor::BlockingWorkerSpec spec;
   spec.name = "dsh-tui-bridge-reader";
   spec.config.thread_name = "dsh-tui-bridge";
@@ -431,7 +436,7 @@ int RunChildMode() {
     OutboundCommand command;
     command.type = "resume-session";
     command.text = session_id;
-    SendCommand(kCommandFd, command);
+    SendCommand(command_fd, command);
     input_text.clear();
   };
   auto session_menu = Menu(&session_entries, &session_selected, session_option);
@@ -443,12 +448,12 @@ int RunChildMode() {
     OutboundCommand command;
     command.type = "set-model";
     command.text = model.provider + "|" + model.id;
-    SendCommand(kCommandFd, command);
+    SendCommand(command_fd, command);
   };
   auto model_menu = Menu(&model_entries, &model_selected, model_option);
 
   auto Send = [&](const OutboundCommand& command) {
-    if (!SendCommand(kCommandFd, command)) {
+    if (!SendCommand(command_fd, command)) {
       state.Add(MessageRole::Error, "无法写入 dsh 桥接进程，连接可能已断开。");
     }
   };
@@ -602,6 +607,9 @@ int RunChildMode() {
     main_lines.push_back(hbox({
         text(" DeepSeek Harness ") | bold | color(Color::Cyan),
         filler(),
+        text(BridgeStatusText(state)) |
+            color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
+        filler(),
         text(state.running ? "● 运行中" : "○ 空闲") |
             color(state.running ? Color::Yellow : Color::Green),
         filler(),
@@ -621,7 +629,9 @@ int RunChildMode() {
     main_lines.push_back(hbox({
         text("Enter 发送 · Esc 停止 · Ctrl+N 新建会话 · PgUp/PgDn 历史 · Ctrl+Q 退出") | dim,
         filler(),
-        text("dsh_tui " + std::string(kVersion.substr(8))) | dim,
+        text(BridgeStatusText(state)) |
+            color(state.closed ? Color::Red : state.hello_seen ? Color::Green : Color::Yellow),
+        text("  ·  dsh_tui " + std::string(kVersion.substr(8))) | dim,
     }));
     Element main_panel = vbox(std::move(main_lines)) | border | flex;
 
@@ -658,6 +668,31 @@ int RunChildMode() {
   worker_handle.stop();
   executor.shutdown(true);
   return 0;
+}
+
+int RunChildMode() {
+  if (!FdIsUsable(kEventFd) || !FdIsUsable(kCommandFd)) {
+    std::cerr << "dsh_tui: child mode requires protocol pipes on fd 3 and fd 4.\n"
+              << "Run it through `npx @deepseek-ai/dsh --profile tui`, or use --demo / --self-test.\n";
+    return 2;
+  }
+  return RunBridgeLoop(kEventFd, kCommandFd);
+}
+
+int RunStandaloneMode(const std::string& resume_session_id) {
+  std::string error;
+  if (!EnsureTuiProfile(error)) {
+    std::cerr << "dsh_tui: " << error << "\n";
+    return 2;
+  }
+  BridgeProcess process = SpawnDeepSeekBridge(resume_session_id, error);
+  if (process.pid <= 0) {
+    std::cerr << "dsh_tui: " << error << "\n";
+    return 2;
+  }
+  int code = RunBridgeLoop(process.event_fd, process.command_fd);
+  ReapBridgeProcess(process);
+  return code;
 }
 
 int RunDemoMode() {
@@ -737,11 +772,13 @@ int Main(int argc, char** argv) {
   bool child_mode = false;
   bool demo_mode = false;
   bool self_test = false;
+  std::string resume_session_id;
   for (int i = 1; i < argc; ++i) {
     std::string_view arg = argv[i];
     if (arg == "--child") child_mode = true;
     else if (arg == "--demo") demo_mode = true;
     else if (arg == "--self-test") self_test = true;
+    else if (arg == "--resume" && i + 1 < argc) resume_session_id = argv[++i];
     else if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
     else if (arg == "--version" || arg == "-V") { std::cout << kVersion << "\n"; return 0; }
     else { std::cerr << "dsh_tui: unknown argument: " << arg << "\n\n"; PrintUsage(); return 2; }
@@ -749,8 +786,7 @@ int Main(int argc, char** argv) {
   if (self_test) return RunSelfTest();
   if (demo_mode) return RunDemoMode();
   if (child_mode) return RunChildMode();
-  PrintUsage();
-  return 2;
+  return RunStandaloneMode(resume_session_id);
 }
 
 }  // namespace dsh_tui

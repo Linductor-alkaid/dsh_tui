@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -453,6 +453,40 @@ export function apply(ctx, config) {
     }
   };
 
+  const wireCommandLines = (commandsIn) => {
+    commandsIn?.on?.("error", () => void shutdown(1));
+    commandLines = createInterface({ input: commandsIn, crlfDelay: Infinity });
+    commandLines.on("line", (line) => void onCommand(line));
+    commandLines.on("close", () => void shutdown(0));
+  };
+
+  // Parent mode: dsh_tui itself forked this dsh process with fd 3 (events,
+  // child -> parent) and fd 4 (commands, parent -> child). The native frontend
+  // is already the process that launched us, so do not spawn a second one.
+  const attachParentTransport = () => {
+    eventsOut = {
+      destroyed: false,
+      writable: true,
+      write(chunk) {
+        try {
+          writeSync(3, chunk);
+          return true;
+        } catch {
+          this.destroyed = true;
+          this.writable = false;
+          void shutdown(1);
+          return false;
+        }
+      },
+      end() {
+        this.destroyed = true;
+        this.writable = false;
+      }
+    };
+    const commandsIn = createReadStream(null, { fd: 4, autoClose: false });
+    wireCommandLines(commandsIn);
+  };
+
   const attachChild = (binary) => {
     child = spawn(binary, ["--child"], {
       cwd: process.cwd(),
@@ -462,10 +496,7 @@ export function apply(ctx, config) {
     eventsOut = child.stdio[3];
     const commandsIn = child.stdio[4];
     eventsOut?.on("error", () => void shutdown(1));
-    commandsIn?.on("error", () => void shutdown(1));
-    commandLines = createInterface({ input: commandsIn, crlfDelay: Infinity });
-    commandLines.on("line", (line) => void onCommand(line));
-    commandLines.on("close", () => void shutdown(0));
+    wireCommandLines(commandsIn);
     child.once("error", (error) => {
       console.error(`dsh-tui: ${error instanceof Error ? error.message : String(error)}`);
       void shutdown(1);
@@ -619,8 +650,12 @@ export function apply(ctx, config) {
 
       await switchSession(config.resumeSessionId ? { resumeSessionId: config.resumeSessionId } : {});
       if (liveAgent) {
-        const binary = resolveBinary(config.binaryPath);
-        attachChild(binary);
+        if (process.env.DSH_TUI_PARENT === "1") {
+          attachParentTransport();
+        } else {
+          const binary = resolveBinary(config.binaryPath);
+          attachChild(binary);
+        }
         postWorkspaces();
         void postModels();
         post({

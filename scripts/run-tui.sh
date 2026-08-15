@@ -8,13 +8,8 @@ if [[ ! -x "${ROOT}/build/dsh_tui" ]]; then
   cmake --build "${ROOT}/build" -j
 fi
 
-"${ROOT}/scripts/setup-profile.sh"
-
-# Important: PATH 里的 `dsh` 可能是 apt dancer's distributed shell。
-# 这里显式调用 DeepSeek Harness 的 npx 包。
-if [[ -n "${DSH_LAUNCHER:-}" ]]; then
-  read -r -a LAUNCHER <<< "${DSH_LAUNCHER}"
-else
-  LAUNCHER=(npx --yes @deepseek-ai/dsh)
-fi
-exec "${LAUNCHER[@]}" --profile tui "$@"
+# dsh_tui 会自行初始化 DeepSeek Harness 的 tui profile 并拉起桥接进程。
+# 可用环境变量：
+#   DSH_HOME  DeepSeek Harness home（默认 ~/.dsh）
+#   DSH_BIN   DeepSeek Harness dsh 可执行文件（默认通过 npx 调用）
+exec "${ROOT}/build/dsh_tui" "$@"

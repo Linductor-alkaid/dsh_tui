@@ -34,13 +34,24 @@ cmake --build build -j
 ./build/dsh_tui --self-test
 ```
 
-## 安装 TUI profile 并启动
+## 启动
+
+直接运行即可。`dsh_tui` 会：
+
+1. 自动初始化 `$DSH_HOME/profiles/tui`（默认 `~/.dsh/profiles/tui`）；
+2. 通过 `npx @deepseek-ai/dsh`（或 `$DSH_BIN`）启动 DeepSeek Harness；
+3. 在 fd3/fd4 上完成桥接，用户只会在状态栏看到 `◌ 桥接中… → ● 桥接已连接`。
+
+```bash
+./build/dsh_tui
+./build/dsh_tui --resume <session-id>
+./scripts/run-tui.sh
+```
+
+也可以沿用 profile 启动方式（此时 dsh 反向 spawn 原生前端）：
 
 ```bash
 ./scripts/setup-profile.sh
-./scripts/run-tui.sh
-
-# 等价于：
 npx @deepseek-ai/dsh --profile tui
 ```
 
