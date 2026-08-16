@@ -22,6 +22,7 @@
 #include "ftxui/component/event.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
+#include "ftxui/screen/screen.hpp"
 #include "ftxui/screen/box.hpp"
 
 #include "ds_bridge.hpp"
@@ -203,6 +204,31 @@ Element RenderMessage(const ChatMessage& message, size_t index = 0,
   }
   lines.push_back(paragraph(message.text) | color(tint));
   return vbox(std::move(lines));
+}
+
+Element BuildCommandPaletteElement(const std::vector<CommandInfo>& commands,
+                                      const std::vector<size_t>& matches,
+                                      int selected,
+                                      std::vector<ftxui::Box>& boxes) {
+  if (matches.empty()) {
+    return window(text(" 命令 "), text("未知命令") | color(Color::Red));
+  }
+  boxes.assign(matches.size(), ftxui::Box{});
+  Elements rows;
+  for (size_t i = 0; i < matches.size(); ++i) {
+    const CommandInfo& command = commands[matches[i]];
+    const bool is_selected = static_cast<int>(i) == selected;
+    Element row = hbox({
+        text(is_selected ? "❯ /" + command.name : "  /" + command.name) |
+            bold | color(is_selected ? Color::Cyan : Color::White),
+        text(command.hint.empty() ? "" : " " + command.hint) | dim,
+        filler(),
+    });
+    row = row | reflect(boxes[i]);
+    rows.push_back(row);
+    rows.push_back(paragraph("    " + command.description) | dim);
+  }
+  return window(text(" 命令 "), vbox(std::move(rows)));
 }
 
 Element QuestionPanel(const DeepSeekState& state) {
@@ -453,6 +479,18 @@ int RunSelfTest() {
       {"feedback", "record feedback", "<text>"},
       {"goal", "set or view the goal", "[objective]"},
   };
+  std::vector<ftxui::Box> palette_boxes;
+  ftxui::Element palette =
+      BuildCommandPaletteElement(slash_commands, {0, 1, 2}, 0, palette_boxes);
+  ftxui::Screen palette_screen(70, 10);
+  ftxui::Render(palette_screen, palette);
+  std::string palette_text = palette_screen.ToString();
+  if (palette_text.find("/goal") == std::string::npos ||
+      palette_text.find("set or view the goal") == std::string::npos) {
+    std::cerr << "command palette rendering assertions failed\n";
+    return 1;
+  }
+
   if (DecideSlashSubmit("/goal", slash_commands, 0).kind != SlashSubmitKind::Fill ||
       DecideSlashSubmit("/goal", slash_commands, 0).fill != "/goal " ||
       DecideSlashSubmit("/goal ", slash_commands, 0).kind != SlashSubmitKind::Execute ||
@@ -1176,25 +1214,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       permission_popup = window(text(" 权限预设 "), vbox(std::move(permission_rows)));
     }
     Element command_palette = emptyElement();
-    if (SlashPaletteActive() && !command_matches.empty()) {
-      command_palette_boxes.assign(command_matches.size(), ftxui::Box{});
-      Elements command_rows;
-      for (size_t i = 0; i < command_matches.size(); ++i) {
-        const CommandInfo& command = state.commands[command_matches[i]];
-        const bool selected = static_cast<int>(i) == command_match_selected;
-        Element row = hbox({
-            text(selected ? "❯ /" + command.name : "  /" + command.name) |
-                bold | color(selected ? Color::Cyan : Color::White),
-            text(command.hint.empty() ? "" : " " + command.hint) | dim,
-            filler(),
-        });
-        row = row | reflect(command_palette_boxes[i]);
-        command_rows.push_back(row);
-        command_rows.push_back(paragraph("    " + command.description) | dim);
-      }
-      command_palette = window(text(" 命令 "), vbox(std::move(command_rows)));
-    } else if (SlashPaletteActive()) {
-      command_palette = window(text(" 命令 "), text("未知命令") | color(Color::Red));
+    if (SlashPaletteActive()) {
+      command_palette = BuildCommandPaletteElement(state.commands, command_matches,
+                                                   command_match_selected,
+                                                   command_palette_boxes);
     }
 
     Element question_panel = QuestionPanel(state);
