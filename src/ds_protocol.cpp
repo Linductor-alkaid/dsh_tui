@@ -87,6 +87,13 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     }
     return event;
   }
+  if (type == "workspace-added") {
+    event.type = InboundEvent::Type::WorkspaceAdded;
+    event.text = StringField(json, "id");
+    event.secondary = StringField(json, "title");
+    event.detail = StringField(json, "path");
+    return event;
+  }
   if (type == "sessions") {
     event.type = InboundEvent::Type::Sessions;
     const Json* sessions = json.find("sessions");
@@ -299,6 +306,8 @@ std::string OutboundJson(const OutboundCommand& command) {
   if (!command.text.empty()) object["text"] = command.text;
   if (!command.request_id.empty()) object["requestId"] = command.request_id;
   if (!command.item_id.empty()) object["questionId"] = command.item_id;
+  if (!command.path.empty()) object["path"] = command.path;
+  if (!command.title.empty()) object["title"] = command.title;
   if (!command.selected.empty() || !command.custom.empty()) {
     Json::Array selected;
     for (const auto& item : command.selected) selected.emplace_back(item);

@@ -251,6 +251,33 @@ Element BuildPermissionPopupElement(const std::vector<PermissionPresetInfo>& per
   return window(text(" 权限预设 "), vbox(std::move(rows)));
 }
 
+std::string SuggestedWorkspaceTitle(std::string path) {
+  if (path == "~") return {};
+  if (path.rfind("~/", 0) == 0 || path.rfind("~\\", 0) == 0) path.erase(0, 2);
+  while (path.size() > 1 && (path.back() == '/' || path.back() == '\\')) path.pop_back();
+  if (path.empty() || path == "." || path == "..") return {};
+  size_t separator = path.find_last_of("/\\");
+  std::string title = separator == std::string::npos ? path : path.substr(separator + 1);
+  return Trim(title);
+}
+
+Element BuildAddWorkspacePageElement(Element path_field, Element title_field,
+                                     Element actions, const std::string& error) {
+  Elements rows;
+  rows.push_back(text("路径") | bold | color(Color::Cyan));
+  rows.push_back(hbox({text("  "), path_field | flex}));
+  rows.push_back(separatorEmpty());
+  rows.push_back(text("标题") | bold | color(Color::Cyan));
+  rows.push_back(hbox({text("  "), title_field | flex}));
+  if (!error.empty()) {
+    rows.push_back(separatorEmpty());
+    rows.push_back(paragraph(error) | color(Color::Red));
+  }
+  rows.push_back(separator());
+  rows.push_back(actions);
+  return window(text(" 新增工作区 "), vbox(std::move(rows))) | size(WIDTH, EQUAL, 68);
+}
+
 Element QuestionPanel(const DeepSeekState& state) {
   if (state.ask.active) {
     const Question& question = state.ask.questions[state.ask.index];
@@ -471,6 +498,8 @@ int RunSlashDemo() {
 int RunSelfTest() {
   std::vector<std::string> samples = {
       R"({"type":"workspaces","workspaces":[{"id":"w","path":"/tmp","title":"demo","sessionIds":["s"]}]})",
+      R"({"type":"workspace-added","id":"w","title":"demo","path":"/tmp"})",
+      R"({"type": "workspace-added", "id": "w3", "title": "pretty", "path": "/tmp/pretty"})",
       R"({"type":"sessions","sessions":[{"id":"s","title":"标题","cwd":"/tmp","workspaceId":"w"}]})",
       R"({"type":"models","models":[{"provider":"p","id":"m","name":"Model","defaultEffort":"medium","efforts":[{"id":"low","name":"低"},{"id":"medium","name":"中"},{"id":"high","name":"高"}]}]})",
       R"({"type":"presets","presets":[{"id":"standard","name":"标准模式","description":"完整"},{"id":"code","name":"PTC 模式","description":"Code Mode"}]})",
@@ -547,6 +576,30 @@ int RunSelfTest() {
     return 1;
   }
 
+  ftxui::Element add_workspace_page = BuildAddWorkspacePageElement(
+      text("/tmp/demo"), text("demo"),
+      hbox({text("取消"), text(" "), text("添加")}),
+      "路径不能为空");
+  ftxui::Screen add_workspace_screen(70, 16);
+  ftxui::Render(add_workspace_screen, add_workspace_page);
+  std::string add_workspace_text = add_workspace_screen.ToString();
+  if (add_workspace_text.find("新增工作区") == std::string::npos ||
+      add_workspace_text.find("/tmp/demo") == std::string::npos ||
+      add_workspace_text.find("demo") == std::string::npos ||
+      add_workspace_text.find("路径不能为空") == std::string::npos ||
+      add_workspace_text.find("添加") == std::string::npos) {
+    std::cerr << "add workspace page rendering assertions failed\n";
+    return 1;
+  }
+  if (SuggestedWorkspaceTitle("/tmp/demo") != "demo" ||
+      SuggestedWorkspaceTitle("/tmp/") != "tmp" ||
+      SuggestedWorkspaceTitle("project") != "project" ||
+      SuggestedWorkspaceTitle("~") != "" ||
+      SuggestedWorkspaceTitle("~/projects/demo") != "demo") {
+    std::cerr << "workspace title suggestion assertions failed\n";
+    return 1;
+  }
+
   if (DecideSlashSubmit("/goal", slash_commands, 0).kind != SlashSubmitKind::Execute ||
       DecideSlashSubmit("/goal ", slash_commands, 0).kind != SlashSubmitKind::Execute ||
       DecideSlashSubmit("/goal clear", slash_commands, 0).kind != SlashSubmitKind::Execute ||
@@ -567,6 +620,32 @@ int RunSelfTest() {
     std::cerr << "outbound encoding failed\n";
     return 1;
   }
+
+  OutboundCommand add_workspace_command;
+  add_workspace_command.type = "add-workspace";
+  add_workspace_command.path = "/tmp/new-workspace";
+  add_workspace_command.title = "new";
+  wire = OutboundJson(add_workspace_command);
+  auto add_workspace_json = Json::parse(wire);
+  if (!add_workspace_json.has_value() ||
+      add_workspace_json->at("type").as_string() != "add-workspace" ||
+      add_workspace_json->at("path").as_string() != "/tmp/new-workspace" ||
+      add_workspace_json->at("title").as_string() != "new") {
+    std::cerr << "add-workspace outbound encoding failed\n";
+    return 1;
+  }
+
+  auto workspace_added_json = Json::parse(R"({"type":"workspace-added","id":"w2","title":"新增","path":"/tmp/new"})");
+  if (!workspace_added_json.has_value()) { std::cerr << "workspace-added json parse failed\n"; return 1; }
+  auto workspace_added = ParseInboundEvent(*workspace_added_json);
+  if (!workspace_added.has_value() ||
+      workspace_added->type != InboundEvent::Type::WorkspaceAdded ||
+      workspace_added->text != "w2" || workspace_added->secondary != "新增" ||
+      workspace_added->detail != "/tmp/new") {
+    std::cerr << "workspace-added event parsing failed\n";
+    return 1;
+  }
+
   std::cout << "dsh_tui self-test ok\n";
   return 0;
 }
@@ -637,14 +716,40 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   int reasoning_selected = 0;
   int preset_selected = 0;
   int permission_selected = 0;
+  std::string workspace_selected_id;
+
+  bool add_workspace_open = false;
+  bool add_workspace_focus_path = false;
+  bool add_workspace_title_auto = true;
+  std::string add_workspace_path;
+  std::string add_workspace_title;
+  std::string add_workspace_error;
+  std::string add_workspace_path_placeholder = "输入目录路径，例如 ~/projects/demo（不存在会自动创建）";
+  std::string add_workspace_title_placeholder = "可选，留空使用目录名";
 
   auto RebuildWorkspaceMenu = [&] {
+    int fallback = workspace_selected;
     workspace_entries.clear();
     for (const auto& workspace : state.workspaces) {
       workspace_entries.push_back(workspace.title.empty() ? workspace.path : workspace.title);
     }
+    if (!workspace_selected_id.empty()) {
+      for (size_t i = 0; i < state.workspaces.size(); ++i) {
+        if (state.workspaces[i].id == workspace_selected_id) {
+          workspace_selected = static_cast<int>(i);
+          break;
+        }
+      }
+    } else {
+      workspace_selected = fallback;
+    }
     if (workspace_selected >= static_cast<int>(workspace_entries.size())) {
       workspace_selected = workspace_entries.empty() ? 0 : static_cast<int>(workspace_entries.size()) - 1;
+    }
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      workspace_selected_id = state.workspaces[workspace_selected].id;
+    } else {
+      workspace_selected_id.clear();
     }
   };
 
@@ -739,14 +844,26 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       if (state.permissions[i].id == state.permission_id) { permission_selected = static_cast<int>(i); break; }
     }
   };
+  RebuildWorkspaceMenu();
+  RebuildSessionMenu();
   RebuildModelMenu();
   RebuildReasoningMenu();
   RebuildPresetMenu();
   RebuildPermissionMenu();
 
   MenuOption workspace_option = MenuOption::Vertical();
-  workspace_option.on_change = [&] { RebuildSessionMenu(); };
-  workspace_option.on_enter = [&] { /* selection updates session list */ };
+  workspace_option.on_change = [&] {
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      workspace_selected_id = state.workspaces[workspace_selected].id;
+    }
+    RebuildSessionMenu();
+  };
+  workspace_option.on_enter = [&] {
+    if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      workspace_selected_id = state.workspaces[workspace_selected].id;
+    }
+    RebuildSessionMenu();
+  };
   auto workspace_menu = Menu(&workspace_entries, &workspace_selected, workspace_option);
 
   auto ResumeSelectedSession = [&] {
@@ -827,6 +944,81 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
   };
 
+  auto CloseAddWorkspace = [&] {
+    add_workspace_open = false;
+    add_workspace_focus_path = false;
+    add_workspace_error.clear();
+  };
+
+  auto OpenAddWorkspace = [&] {
+    add_workspace_path.clear();
+    add_workspace_title.clear();
+    add_workspace_error.clear();
+    add_workspace_title_auto = true;
+    add_workspace_open = true;
+    add_workspace_focus_path = true;
+  };
+
+  auto SubmitAddWorkspace = [&] {
+    if (!add_workspace_open) return;
+    std::string path = Trim(add_workspace_path);
+    if (path.empty()) {
+      add_workspace_error = "请输入工作区路径。";
+      add_workspace_focus_path = true;
+      return;
+    }
+    std::string title = Trim(add_workspace_title);
+    add_workspace_error.clear();
+    OutboundCommand command;
+    command.type = "add-workspace";
+    command.path = std::move(path);
+    command.title = std::move(title);
+    Send(command);
+  };
+
+  InputOption add_workspace_path_option = InputOption::Spacious();
+  add_workspace_path_option.multiline = false;
+  add_workspace_path_option.on_change = [&] {
+    add_workspace_error.clear();
+    if (add_workspace_title_auto) add_workspace_title = SuggestedWorkspaceTitle(add_workspace_path);
+  };
+  add_workspace_path_option.on_enter = SubmitAddWorkspace;
+  auto add_workspace_path_input =
+      Input(&add_workspace_path, &add_workspace_path_placeholder, add_workspace_path_option);
+
+  InputOption add_workspace_title_option = InputOption::Spacious();
+  add_workspace_title_option.multiline = false;
+  add_workspace_title_option.on_change = [&] {
+    add_workspace_error.clear();
+    add_workspace_title_auto = false;
+  };
+  add_workspace_title_option.on_enter = SubmitAddWorkspace;
+  auto add_workspace_title_input =
+      Input(&add_workspace_title, &add_workspace_title_placeholder, add_workspace_title_option);
+
+  auto add_workspace_submit_button =
+      Button("✓ 添加", SubmitAddWorkspace, ButtonOption::Ascii());
+  auto add_workspace_cancel_button =
+      Button("✗ 取消", CloseAddWorkspace, ButtonOption::Ascii());
+  auto add_workspace_modal_container = Container::Vertical({
+      add_workspace_path_input,
+      add_workspace_title_input,
+      add_workspace_cancel_button,
+      add_workspace_submit_button,
+  });
+  auto add_workspace_modal = Renderer(add_workspace_modal_container, [&] {
+    return BuildAddWorkspacePageElement(
+        add_workspace_path_input->Render(),
+        add_workspace_title_input->Render(),
+        hbox({
+            text("Enter 添加 · Esc 取消") | dim,
+            filler(),
+            add_workspace_cancel_button->Render(),
+            text(" "),
+            add_workspace_submit_button->Render(),
+        }),
+        add_workspace_error);
+  });
   auto DrainEvents = [&] {
     InboundEvent event;
     while (events.try_receive(event)) {
@@ -838,6 +1030,17 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
                                  ? (state.bridge_log.empty() ? "无桥接日志" : state.bridge_log.back())
                                  : state.error;
         state.Add(MessageRole::Error, "桥接已断开：" + reason);
+      }
+      if (event.type == InboundEvent::Type::WorkspaceAdded) {
+        workspace_selected_id = event.text;
+        RebuildWorkspaceMenu();
+        RebuildSessionMenu();
+        add_workspace_open = false;
+        add_workspace_focus_path = false;
+        add_workspace_error.clear();
+      }
+      if (event.type == InboundEvent::Type::Error && add_workspace_open) {
+        add_workspace_error = state.error;
       }
       if (event.type == InboundEvent::Type::Workspaces || event.type == InboundEvent::Type::Sessions) {
         RebuildWorkspaceMenu();
@@ -881,6 +1084,19 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) screen.Exit();
     }
   };
+
+  add_workspace_modal |= CatchEvent([&](Event event) {
+    // While the add-workspace modal is open, the modal owns focus and would
+    // otherwise swallow Event::Custom wakeups from the bridge reader. Drain
+    // them here so `workspace-added` / error events can close or update the
+    // page.
+    if (event == Event::Custom) { DrainEvents(); return true; }
+    if (event == Event::Escape) { CloseAddWorkspace(); return true; }
+    if (event == Event::CtrlQ) {
+      OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
+    }
+    return false;
+  });
 
   auto AnswerCurrentQuestion = [&] {
     if (!state.ask.active || state.ask.index >= state.ask.questions.size()) return;
@@ -1182,8 +1398,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     return false;
   });
   auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
+  auto add_workspace_button = Button("＋ 添加工作区", OpenAddWorkspace, ButtonOption::Ascii());
 
-  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, preset_menu, permission_menu, model_menu, reasoning_menu});
+  auto sidebar_container = Container::Vertical({workspace_menu, add_workspace_button, new_session_button, session_menu, preset_menu, permission_menu, model_menu, reasoning_menu});
   auto main_container = Container::Vertical({input_component});
 
   // User-resizable panes. The terminal can still hide a rail automatically on
@@ -1197,11 +1414,12 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     Elements sidebar;
     sidebar.push_back(text("工作区") | bold | color(Color::Cyan));
     if (state.workspaces.empty()) {
-      sidebar.push_back(text("（等待 dsh 工作区数据…）") | dim);
+      sidebar.push_back(text("（暂无工作区，点击下方按钮添加）") | dim);
     } else {
       sidebar.push_back(workspace_menu->Render() | yframe);
       sidebar.push_back(text(" " + state.workspaces[workspace_selected].path) | dim);
     }
+    sidebar.push_back(add_workspace_button->Render());
     sidebar.push_back(separatorEmpty());
     sidebar.push_back(new_session_button->Render());
     sidebar.push_back(separatorEmpty());
@@ -1357,6 +1575,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   center = ResizableSplit(std::move(status_option));
 
   auto renderer = Renderer(center, [&] {
+    if (add_workspace_focus_path && add_workspace_open) {
+      add_workspace_path_input->TakeFocus();
+      add_workspace_focus_path = false;
+    }
     const int width = screen.dimx();
     // Auto-hide rails below the thresholds, but only touch the sizes on a
     // visibility transition so a user's drag is never overwritten frame to
@@ -1436,7 +1658,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         }
       }
     }
-    if (event == Event::Custom) { DrainEvents(); return true; }
+    if (event == Event::Custom) {
+      DrainEvents();
+      return true;
+    }
     if (event == Event::CtrlQ) {
       OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
     }
@@ -1484,6 +1709,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     return false;
   });
+
+  main_component |= Modal(add_workspace_modal, &add_workspace_open);
 
   DrainEvents();
   input_component->TakeFocus();

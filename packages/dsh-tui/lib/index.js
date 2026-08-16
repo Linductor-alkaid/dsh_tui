@@ -1,8 +1,19 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createReadStream, existsSync, readFileSync, writeSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +59,113 @@ function readJsonFile(path, fallback) {
   }
 }
 
+function writeJsonFileAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
+  try {
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+function expandHomePath(input) {
+  if (input === "~") return homedir();
+  if (input.startsWith("~/") || input.startsWith("~\\")) {
+    return join(homedir(), input.slice(2));
+  }
+  return input;
+}
+
+function prepareWorkspaceDirectory(input) {
+  const value = String(input ?? "").trim();
+  if (value.length === 0) throw new Error("workspace path is empty");
+  const absolute = resolve(expandHomePath(value));
+  try {
+    mkdirSync(absolute, { recursive: true });
+  } catch (error) {
+    throw new Error(`cannot create workspace directory '${absolute}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let metadata;
+  try {
+    metadata = statSync(absolute);
+  } catch (error) {
+    throw new Error(`cannot inspect workspace directory '${absolute}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!metadata.isDirectory()) {
+    throw new Error(`workspace path '${absolute}' exists but is not a directory`);
+  }
+  try {
+    return realpathSync(absolute);
+  } catch (error) {
+    throw new Error(`cannot resolve workspace directory '${absolute}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function workspaceStoragePath() {
+  return join(dshHome(), "storages", "workspace.json");
+}
+
+function createWorkspaceRecordInStorage(canonicalPath, requestedTitle) {
+  const storagePath = workspaceStoragePath();
+  const storage = readJsonFile(storagePath, null);
+  const previousUnit = storage && typeof storage === "object" && storage.unit && typeof storage.unit === "object"
+    ? storage.unit
+    : { name: "workspace", version: 2 };
+  const previousGlobal = storage && typeof storage === "object" && storage.global && typeof storage.global === "object"
+    ? storage.global
+    : { initialized: false, workspaceIds: [], archivedSessionIds: [] };
+  const previousTables = storage && typeof storage === "object" && storage.tables && typeof storage.tables === "object"
+    ? storage.tables
+    : {};
+  const table = previousTables.workspaces && typeof previousTables.workspaces === "object"
+    ? previousTables.workspaces
+    : {};
+
+  for (const [id, workspace] of Object.entries(table)) {
+    if (!workspace || typeof workspace !== "object" || typeof workspace.path !== "string") continue;
+    try {
+      const existingPath = existsSync(workspace.path) ? realpathSync(workspace.path) : resolve(workspace.path);
+      if (existingPath === canonicalPath) {
+        return { id, path: workspace.path, title: workspace.title || basename(canonicalPath) || id, created: false };
+      }
+    } catch {
+      // A stale record with an unreadable path is not a duplicate.
+    }
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const title = String(requestedTitle ?? "").trim() || basename(canonicalPath) || canonicalPath;
+  const record = {
+    path: canonicalPath,
+    title,
+    sessionIds: [],
+    createdAt: now,
+    updatedAt: now
+  };
+  table[id] = record;
+
+  const workspaceIds = Array.isArray(previousGlobal.workspaceIds)
+    ? [...previousGlobal.workspaceIds]
+    : Object.keys(table);
+  const nextGlobal = {
+    ...previousGlobal,
+    initialized: true,
+    workspaceIds: [id, ...workspaceIds.filter((workspaceId) => workspaceId !== id)]
+  };
+  if (!Array.isArray(nextGlobal.archivedSessionIds)) nextGlobal.archivedSessionIds = [];
+  const nextStorage = {
+    unit: previousUnit,
+    global: nextGlobal,
+    tables: { ...previousTables, workspaces: table }
+  };
+  writeJsonFileAtomic(storagePath, nextStorage);
+  return { id, path: canonicalPath, title, created: true };
+}
+
 const sessionTitleOverrides = new Map();
 const workspaceSessionExtras = new Map();
 const pendingNewSessions = new Map();
@@ -58,6 +176,7 @@ function workspaceSnapshot() {
   const workspaces = [];
   const sessions = [];
   const seenSessions = new Set();
+  const seenWorkspaces = new Set();
   const table = storage?.tables?.workspaces ?? {};
 
   const addSession = (sessionId, workspaceId, workspacePath, fallbackTitle) => {
@@ -72,8 +191,10 @@ function workspaceSnapshot() {
     });
   };
 
-  for (const [id, workspace] of Object.entries(table)) {
-    const baseIds = Array.isArray(workspace?.sessionIds) ? workspace.sessionIds : [];
+  const appendWorkspace = (id, workspace) => {
+    if (!workspace || typeof workspace !== "object" || seenWorkspaces.has(id)) return;
+    seenWorkspaces.add(id);
+    const baseIds = Array.isArray(workspace.sessionIds) ? workspace.sessionIds : [];
     const extraIds = workspaceSessionExtras.get(id) ?? [];
     const sessionIds = [...baseIds];
     for (const sessionId of extraIds) {
@@ -81,14 +202,20 @@ function workspaceSnapshot() {
     }
     workspaces.push({
       id,
-      path: workspace?.path ?? "",
-      title: workspace?.title ?? workspace?.path ?? id,
+      path: workspace.path ?? "",
+      title: workspace.title ?? workspace.path ?? id,
       sessionIds
     });
     for (const sessionId of sessionIds) {
-      addSession(sessionId, id, workspace?.path ?? "", undefined);
+      addSession(sessionId, id, workspace.path ?? "", undefined);
     }
-  }
+  };
+
+  const orderedIds = Array.isArray(storage?.global?.workspaceIds)
+    ? storage.global.workspaceIds
+    : Object.keys(table);
+  for (const id of orderedIds) appendWorkspace(String(id), table[id]);
+  for (const [id, workspace] of Object.entries(table)) appendWorkspace(id, workspace);
 
   // Sessions created while no workspace metadata existed yet.
   for (const sessionId of sessionTitleOverrides.keys()) {
@@ -674,6 +801,48 @@ export function apply(ctx, config) {
         }
         break;
       }
+      case "add-workspace": {
+        const rawPath = String(command.path ?? command.text ?? "").trim();
+        const rawTitle = String(command.title ?? "").trim();
+        if (!rawPath) {
+          post({ type: "error", message: "工作区路径不能为空。" });
+          break;
+        }
+        try {
+          const canonicalPath = prepareWorkspaceDirectory(rawPath);
+          let registry;
+          try {
+            registry = ctx.get("workspaceRegistry");
+          } catch {
+            registry = undefined;
+          }
+          let workspace;
+          if (registry && typeof registry.create === "function") {
+            const record = await registry.create(canonicalPath, rawTitle || undefined);
+            workspace = {
+              id: String(record.id ?? ""),
+              path: record.path ?? canonicalPath,
+              title: record.title ?? rawTitle ?? basename(canonicalPath),
+              created: false
+            };
+          } else {
+            workspace = createWorkspaceRecordInStorage(canonicalPath, rawTitle);
+          }
+          if (!workspace.id) throw new Error("workspace registry returned an empty workspace id");
+          postWorkspaces();
+          post({ type: "workspace-added", id: workspace.id, title: workspace.title, path: workspace.path });
+          post({
+            type: "message",
+            role: "system",
+            text: `已选择工作区：${workspace.title}（${workspace.path}）`
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`dsh-tui: add workspace failed: ${message}`);
+          post({ type: "error", message: `添加工作区失败：${message}` });
+        }
+        break;
+      }
       case "new-session": {
         const snapshot = workspaceSnapshot();
         const workspaceId = String(command.text ?? "");
@@ -1015,3 +1184,5 @@ export function apply(ctx, config) {
     return shutdown(0);
   };
 }
+
+export { createWorkspaceRecordInStorage, prepareWorkspaceDirectory, workspaceSnapshot };

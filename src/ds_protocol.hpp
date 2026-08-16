@@ -98,6 +98,7 @@ struct InboundEvent {
     Hello,
     Reset,
     Workspaces,
+    WorkspaceAdded,
     Sessions,
     Models,
     Presets,
@@ -157,6 +158,8 @@ struct OutboundCommand {
   std::string item_id;
   std::vector<std::string> selected;
   std::string custom;
+  std::string path;
+  std::string title;
 };
 
 std::string OutboundJson(const OutboundCommand& command);

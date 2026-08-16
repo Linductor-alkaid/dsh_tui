@@ -329,6 +329,7 @@ class Json {
         skip_whitespace();
         if (pos_ >= input_.size() || input_[pos_] != ':') return false;
         ++pos_;
+        skip_whitespace();
         Json value;
         if (!parse_value(value)) return false;
         values[key.as_string()] = std::move(value);

@@ -85,10 +85,15 @@ def test_child_mode(binary):
         {"type": "hello", "sessionId": "test", "model": "m", "provider": "p", "cwd": "/tmp"},
         {"type": "history", "messages": [{"role": "user", "text": "hi"}]},
         {"type": "status", "status": "idle"},
+        {"type": "workspaces", "workspaces": [{"id": "ws1", "path": "/tmp", "title": "demo", "sessionIds": []}]},
+        {"type": "workspace-added", "id": "ws1", "title": "demo", "path": "/tmp"},
+        {"type": "message", "role": "system", "text": "已选择工作区：demo（/tmp）"},
         {"type": "bye", "reason": "ok"},
     ]
     for event in events:
-        os.write(event_w, (json.dumps(event) + "\n").encode("utf-8"))
+        # Keep the wire format identical to the production JS bridge:
+        # JSON.stringify emits compact JSON, without whitespace.
+        os.write(event_w, (json.dumps(event, separators=(",", ":")) + "\n").encode("utf-8"))
     os.close(event_w)
 
     code = wait_exit(pid, 8)

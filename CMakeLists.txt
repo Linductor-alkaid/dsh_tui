@@ -62,3 +62,9 @@ add_test(NAME bridge_roundtrip
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/tests/bridge_roundtrip.py
                  $<TARGET_FILE:dsh_tui>)
+
+add_test(NAME workspace_add_page_roundtrip
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/workspace_add_page_roundtrip.py
+                 $<TARGET_FILE:dsh_tui>)
+set_tests_properties(workspace_add_page_roundtrip PROPERTIES TIMEOUT 20)

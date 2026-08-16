@@ -84,6 +84,11 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       ResetConversation(event.text);
       break;
 
+    case InboundEvent::Type::WorkspaceAdded:
+      // Handled by the bridge loop so it can select the newly added
+      // workspace and close the add-workspace page.
+      break;
+
     case InboundEvent::Type::Workspaces:
       workspaces = event.workspaces;
       break;
