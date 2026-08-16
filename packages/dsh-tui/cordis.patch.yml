@@ -3,6 +3,11 @@
 # provider and the native FTXUI frontend bridge.
 
 - insert:
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
     - id: dsh-tui-startup
       name: 'dsh-tui/startup'
 
@@ -11,4 +16,5 @@
       inject: [dshTuiStartup]
       config:
         resumeSessionId: !!js ctx.dshTuiStartup.resumeSessionId
+        presetId: !!js ctx.dshTuiStartup.presetId
         binaryPath: !!js ctx.dshTuiStartup.binaryPath

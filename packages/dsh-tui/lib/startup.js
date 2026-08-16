@@ -12,6 +12,7 @@ Open the DeepSeek Harness terminal UI.
 
 Options:
   --resume <session>   resume a persisted session id
+  --preset <id>        agent preset id (standard / code / minimal / cordis)
   --binary <path>      path to the dsh_tui frontend executable
   -h, --help           show this help
 
@@ -39,7 +40,7 @@ export function apply(ctx) {
       exit(0);
       return;
     }
-    if (arg === "--resume" || arg === "--binary") {
+    if (arg === "--resume" || arg === "--binary" || arg === "--preset") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
         process.stderr.write(`dsh --profile tui: ${arg} needs a value\n`);
@@ -57,6 +58,7 @@ export function apply(ctx) {
 
   ctx.provide(DSH_TUI_STARTUP_SERVICE, {
     resumeSessionId: options.resume,
+    presetId: options.preset,
     binaryPath: options.binary
   });
 }

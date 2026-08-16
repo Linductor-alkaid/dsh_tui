@@ -53,6 +53,8 @@ void DeepSeekState::ResetConversation(const std::string& reason) {
   todos.clear();
   bridge_log.clear();
   reasoning_effort.clear();
+  preset_id.clear();
+  preset_name.clear();
   if (reason.empty()) {
     Add(MessageRole::Welcome, "会话已切换。输入消息开始。");
   } else {
@@ -67,6 +69,7 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       model = event.secondary;
       provider = event.third;
       reasoning_effort = event.reasoning_effort;
+      preset_id = event.preset_id;
       cwd = event.detail;
       resumed = event.flag;
       hello_seen = true;
@@ -89,6 +92,15 @@ void DeepSeekState::Apply(const InboundEvent& event) {
 
     case InboundEvent::Type::Models:
       models = event.models;
+      break;
+
+    case InboundEvent::Type::Presets:
+      presets = event.presets;
+      break;
+
+    case InboundEvent::Type::Preset:
+      preset_id = event.text;
+      preset_name = event.secondary;
       break;
 
     case InboundEvent::Type::History:

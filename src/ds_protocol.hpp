@@ -19,6 +19,12 @@ struct WorkspaceInfo {
   std::vector<std::string> session_ids;
 };
 
+struct PresetInfo {
+  std::string id;
+  std::string name;
+  std::string description;
+};
+
 struct ReasoningEffortInfo {
   std::string id;
   std::string name;
@@ -81,6 +87,8 @@ struct InboundEvent {
     Workspaces,
     Sessions,
     Models,
+    Presets,
+    Preset,
     History,
     Message,
     Delta,
@@ -102,6 +110,7 @@ struct InboundEvent {
   std::string third;
   std::string detail;
   std::string reasoning_effort;
+  std::string preset_id;
   bool flag = false;
   bool running = false;
   int64_t number = 0;
@@ -109,6 +118,7 @@ struct InboundEvent {
   std::vector<WorkspaceInfo> workspaces;
   std::vector<SessionInfo> sessions;
   std::vector<ModelInfo> models;
+  std::vector<PresetInfo> presets;
   std::vector<HistoryMessage> history;
   std::vector<Question> questions;
   std::vector<TodoItem> todos;

@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { DSH_TUI_STARTUP_SERVICE } from "./startup.js";
 
 export const name = "dsh-tui";
-export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions"];
+export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions", "agentPresets"];
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -176,6 +176,7 @@ export function apply(ctx, config) {
   let disposed = false;
   let switching = false;
   const selectionRef = { current: undefined, assembled: undefined };
+  let selectedPresetId;
   const closeListeners = [];
   const pendingQuestions = new Map();
   const pendingApprovals = new Map();
@@ -271,6 +272,24 @@ export function apply(ctx, config) {
     post({ type: "sessions", sessions: snapshot.sessions });
   };
 
+  const postPresets = async () => {
+    try {
+      const presets = await ctx.agentPresets?.list?.() ?? [];
+      post({
+        type: "presets",
+        presets: presets.map((preset) => ({
+          id: preset.id,
+          name: preset.name ?? preset.id,
+          description: preset.description ?? ""
+        }))
+      });
+      const current = presets.find((preset) => preset.id === selectedPresetId) ?? presets[0];
+      if (current) post({ type: "preset", id: current.id, name: current.name ?? current.id });
+    } catch {
+      // Presentation-only; the selected/default preset still mounts.
+    }
+  };
+
   const settlePendingInteractions = (error) => {
     for (const pending of [...pendingQuestions.values()]) {
       pending.onAbort?.();
@@ -305,6 +324,17 @@ export function apply(ctx, config) {
     if (!disposed) appExit(code);
   };
 
+  const setupAgent = async (agentCtx) => {
+    if (ctx.agentPresets && selectedPresetId) {
+      try {
+        await ctx.agentPresets.mount(agentCtx, selectedPresetId);
+      } catch (error) {
+        console.error(`dsh-tui: preset ${selectedPresetId} mount failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    installModelSelection(agentCtx, selectionRef);
+  };
+
   const switchSession = async (options) => {
     if (switching || shuttingDown) return;
     switching = true;
@@ -332,14 +362,14 @@ export function apply(ctx, config) {
         liveHandle = await ctx.get("agents").resume({
           resumeSessionId: String(options.resumeSessionId),
           agentOptions,
-          setup: (agentCtx) => { installModelSelection(agentCtx, selectionRef); }
+          setup: setupAgent
         });
       } else {
         liveHandle = await ctx.get("agents").create({
           sessionId: `session-${randomUUID()}`,
           meta: { cwd: options.cwd ?? process.cwd() },
           agentOptions,
-          setup: (agentCtx) => { installModelSelection(agentCtx, selectionRef); }
+          setup: setupAgent
         });
       }
       liveAgent = liveHandle.agent;
@@ -356,6 +386,7 @@ export function apply(ctx, config) {
         provider: selectionRef.current?.provider ?? "",
         model: selectionRef.current?.model ?? "",
         reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
+        presetId: selectedPresetId ?? "",
         cwd: liveAgent.session.header?.cwd ?? process.cwd(),
         resumed: Boolean(options.resumeSessionId)
       });
@@ -404,6 +435,47 @@ export function apply(ctx, config) {
           const snapshot = workspaceSnapshot();
           const session = snapshot.sessions.find((item) => item.id === sessionId);
           await switchSession({ resumeSessionId: sessionId, cwd: session?.cwd });
+        }
+        break;
+      }
+      case "set-preset": {
+        const presetId = String(command.text ?? "");
+        if (!presetId) break;
+        selectedPresetId = presetId;
+        const presets = await ctx.agentPresets?.list?.() ?? [];
+        const preset = presets.find((item) => item.id === presetId);
+        let applied = false;
+        if (liveAgent) {
+          const hasWork = liveAgent.session.events.some((event) =>
+            event.type === "user/message" || event.type === "assistant/message" || event.type === "tool/call"
+          );
+          if (!hasWork) {
+            try {
+              await ctx.agentPresets.recompose(liveAgent.ctx, presetId);
+              applied = true;
+            } catch (error) {
+              console.error(`dsh-tui: preset recompose failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+        }
+        post({ type: "preset", id: presetId, name: preset?.name ?? presetId });
+        if (applied) {
+          post({
+            type: "hello",
+            sessionId: liveAgent.session.id,
+            provider: selectionRef.current?.provider ?? "",
+            model: selectionRef.current?.model ?? "",
+            reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
+            presetId,
+            cwd: liveAgent.session.header?.cwd ?? process.cwd(),
+            resumed: Boolean(config.resumeSessionId)
+          });
+        } else {
+          post({
+            type: "message",
+            role: "system",
+            text: `模式已设为 ${preset?.name ?? presetId}，将在下一个新会话生效。`
+          });
         }
         break;
       }
@@ -684,6 +756,7 @@ export function apply(ctx, config) {
       const agents = ctx.get("agents");
       const defaultModel = ctx.get("agentDefaultModel");
       if (!agents || !sessions || !defaultModel) return;
+      selectedPresetId = config.presetId || ctx.agentPresets?.defaultId || "standard";
 
       const closeUserQuestions = typeof ctx.userQuestions?.registerProvider === "function"
         ? ctx.userQuestions.registerProvider({ ask: askUserQuestions })
@@ -707,6 +780,7 @@ export function apply(ctx, config) {
           attachChild(binary);
         }
         postWorkspaces();
+        void postPresets();
         void postModels();
         post({
           type: "history",
@@ -718,6 +792,7 @@ export function apply(ctx, config) {
           provider: selectionRef.current?.provider ?? "",
           model: selectionRef.current?.model ?? "",
           reasoningEffort: selectionRef.current?.reasoningEffort ?? "",
+          presetId: selectedPresetId ?? "",
           cwd: liveAgent.session.header?.cwd ?? process.cwd(),
           resumed: Boolean(config.resumeSessionId)
         });

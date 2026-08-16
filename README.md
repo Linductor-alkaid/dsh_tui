@@ -76,6 +76,7 @@ DSH_LAUNCHER="/path/to/deepseek-dsh-bin" ./scripts/run-tui.sh
 ## 功能
 
 - 工作区列表与历史会话列表（读取 `$DSH_HOME/storages/workspace.json`）
+- 模式选择：标准模式 / PTC 模式 / 极简模式 / 创造模式（agent presets）
 - 模型选择与思考深度选择（读取 dsh llm 目录并写入默认模型）
 - 新建会话 / `--resume <id>` 恢复会话 / 运行中切换会话
 - 流式文本与 reasoning 展示、工具调用卡片

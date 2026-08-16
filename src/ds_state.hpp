@@ -49,6 +49,9 @@ class DeepSeekState {
   std::vector<WorkspaceInfo> workspaces;
   std::vector<SessionInfo> sessions;
   std::vector<ModelInfo> models;
+  std::vector<PresetInfo> presets;
+  std::string preset_id;
+  std::string preset_name;
   std::deque<ChatMessage> messages;
   TokenStats stats;
   std::vector<TodoItem> todos;

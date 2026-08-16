@@ -63,6 +63,7 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     event.third = StringField(json, "provider");
     event.detail = StringField(json, "cwd");
     event.reasoning_effort = StringField(json, "reasoningEffort");
+    event.preset_id = StringField(json, "presetId");
     event.flag = BoolField(json, "resumed");
     return event;
   }
@@ -99,6 +100,26 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
         event.sessions.push_back(std::move(item));
       }
     }
+    return event;
+  }
+  if (type == "presets") {
+    event.type = InboundEvent::Type::Presets;
+    const Json* presets = json.find("presets");
+    if (presets != nullptr && presets->is_array()) {
+      for (const auto& preset : presets->as_array()) {
+        PresetInfo item;
+        item.id = StringField(preset, "id");
+        item.name = StringField(preset, "name");
+        item.description = StringField(preset, "description");
+        event.presets.push_back(std::move(item));
+      }
+    }
+    return event;
+  }
+  if (type == "preset") {
+    event.type = InboundEvent::Type::Preset;
+    event.text = StringField(json, "id");
+    event.secondary = StringField(json, "name");
     return event;
   }
   if (type == "models") {
