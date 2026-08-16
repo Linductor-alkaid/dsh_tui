@@ -226,6 +226,31 @@ Element BuildCommandPaletteElement(const std::vector<CommandInfo>& commands,
   return window(text(" 命令 "), vbox(std::move(rows)));
 }
 
+Element BuildPermissionPopupElement(const std::vector<PermissionPresetInfo>& permissions,
+                                        int selected,
+                                        std::vector<ftxui::Box>& boxes) {
+  auto label_for = [](const PermissionPresetInfo& permission) {
+    std::string label = permission.name;
+    if (permission.id == "read-only") label = "只读 (read-only)";
+    else if (permission.id == "workspace-write") label = "工作区写入 (workspace-write)";
+    else if (permission.id == "danger-full-access") label = "完全访问 (full access)";
+    return label.empty() ? permission.id : label;
+  };
+  boxes.assign(permissions.size(), ftxui::Box{});
+  Elements rows;
+  for (size_t i = 0; i < permissions.size(); ++i) {
+    const bool is_selected = static_cast<int>(i) == selected;
+    Element row = hbox({
+        text(is_selected ? "❯ " : "  ") | color(is_selected ? Color::Cyan : Color::White),
+        text(label_for(permissions[i])) | (is_selected ? bold : nothing),
+        filler(),
+    });
+    row = row | reflect(boxes[i]);
+    rows.push_back(row);
+  }
+  return window(text(" 权限预设 "), vbox(std::move(rows)));
+}
+
 Element QuestionPanel(const DeepSeekState& state) {
   if (state.ask.active) {
     const Question& question = state.ask.questions[state.ask.index];
@@ -502,6 +527,23 @@ int RunSelfTest() {
   if (palette_text.find("/goal") == std::string::npos ||
       palette_text.find("set or view the goal") == std::string::npos) {
     std::cerr << "command palette rendering assertions failed\n";
+    return 1;
+  }
+
+  std::vector<PermissionPresetInfo> permission_infos = {
+      {"read-only", "read-only", ""},
+      {"workspace-write", "workspace-write", ""},
+      {"danger-full-access", "danger-full-access", ""},
+  };
+  std::vector<ftxui::Box> permission_boxes;
+  ftxui::Element permission_element =
+      BuildPermissionPopupElement(permission_infos, 0, permission_boxes);
+  ftxui::Screen permission_screen(70, 8);
+  ftxui::Render(permission_screen, permission_element);
+  std::string permission_text = permission_screen.ToString();
+  if (permission_text.find("只读 (read-only)") == std::string::npos ||
+      permission_text.find("完全访问 (full access)") == std::string::npos) {
+    std::cerr << "permission popup rendering assertions failed\n";
     return 1;
   }
 
@@ -983,14 +1025,6 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     last_command_query = name;
   };
 
-  auto PermissionLabelFor = [&](const PermissionPresetInfo& permission) {
-    std::string label = permission.name;
-    if (permission.id == "read-only") label = "只读 (read-only)";
-    else if (permission.id == "workspace-write") label = "工作区写入 (workspace-write)";
-    else if (permission.id == "danger-full-access") label = "完全访问 (full access)";
-    return label.empty() ? permission.id : label;
-  };
-
   auto UpdateInputPlaceholder = [&] {
     if (SlashPaletteActive()) {
       input_placeholder = "搜索命令…";
@@ -1223,20 +1257,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     Element permission_popup = emptyElement();
     if (slash_permission_popup) {
-      slash_permission_boxes.assign(state.permissions.size(), ftxui::Box{});
-      Elements permission_rows;
-      for (size_t i = 0; i < state.permissions.size(); ++i) {
-        const auto& permission = state.permissions[i];
-        const bool selected = static_cast<int>(i) == slash_permission_selected;
-        Element row = hbox({
-            text(selected ? "❯ " : "  ") | color(selected ? Color::Cyan : Color::White),
-            text(PermissionLabelFor(permission)) | (selected ? bold : nothing),
-            filler(),
-        });
-        row = row | reflect(slash_permission_boxes[i]);
-        permission_rows.push_back(row);
-      }
-      permission_popup = window(text(" 权限预设 "), vbox(std::move(permission_rows)));
+      permission_popup = BuildPermissionPopupElement(state.permissions,
+                                                     slash_permission_selected,
+                                                     slash_permission_boxes);
     }
     Element command_palette = emptyElement();
     if (SlashPaletteActive()) {
