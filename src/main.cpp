@@ -753,6 +753,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   std::vector<ftxui::Box> reasoning_click_boxes;
   std::vector<size_t> command_matches;
   int command_match_selected = -1;
+  std::string last_command_query;
   std::vector<ftxui::Box> command_palette_boxes;
 
   auto MoveActiveReasoning = [&](int direction) {
@@ -829,7 +830,17 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       std::sort(ranked.begin(), ranked.end());
       for (const auto& [score, index] : ranked) command_matches.push_back(index);
     }
-    if (!command_matches.empty()) command_match_selected = 0;
+    if (!command_matches.empty()) {
+      if (last_command_query == name) {
+        if (command_match_selected < 0 ||
+            command_match_selected >= static_cast<int>(command_matches.size())) {
+          command_match_selected = 0;
+        }
+      } else {
+        command_match_selected = 0;
+      }
+    }
+    last_command_query = name;
   };
 
   auto Submit = [&] {
@@ -843,21 +854,26 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         if (command.name == name) { exact_command = &command; break; }
       }
       std::string trimmed_line = Trim(input_text);
-      bool bare = trimmed_line.find(' ') == std::string::npos;
-      if (exact_command != nullptr && bare && !exact_command->hint.empty()) {
+      std::string after_name = exact_command == nullptr ? "" : input_text.substr(exact_command->name.size() + 1);
+      bool no_separator = after_name.empty();
+      bool separator_only = !after_name.empty() &&
+                            after_name.find_first_not_of(" \t\r\n") == std::string::npos;
+      if (exact_command != nullptr && no_separator && !exact_command->hint.empty()) {
         // WebUI leadingInput claim: `/goal` or `/feedback` alone claims the
         // token and waits for the user's argument instead of executing.
         input_text = "/" + exact_command->name + " ";
         RefreshCommandMatches();
         return;
       }
-      if (exact_command != nullptr && ((bare && exact_command->hint.empty()) ||
-                                        (!bare && !exact_command->hint.empty()))) {
+      if (exact_command != nullptr &&
+          (((no_separator || separator_only) && exact_command->hint.empty()) ||
+           (!no_separator && !exact_command->hint.empty()))) {
         OutboundCommand command;
         command.type = "run-command";
         command.text = input_text;
         Send(command);
-      } else if (exact_command != nullptr && !bare && exact_command->hint.empty()) {
+      } else if (exact_command != nullptr && !no_separator && !separator_only &&
+                 exact_command->hint.empty()) {
         // WebUI leaves non-bare no-argument commands unclaimed; the line is
         // sent as an ordinary prompt instead of being executed.
         OutboundCommand command;
