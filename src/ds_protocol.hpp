@@ -19,6 +19,12 @@ struct WorkspaceInfo {
   std::vector<std::string> session_ids;
 };
 
+struct PermissionPresetInfo {
+  std::string id;
+  std::string name;
+  std::string description;
+};
+
 struct PresetInfo {
   std::string id;
   std::string name;
@@ -89,6 +95,8 @@ struct InboundEvent {
     Models,
     Presets,
     Preset,
+    Permissions,
+    Permission,
     History,
     Message,
     Delta,
@@ -119,6 +127,9 @@ struct InboundEvent {
   std::vector<SessionInfo> sessions;
   std::vector<ModelInfo> models;
   std::vector<PresetInfo> presets;
+  std::vector<PermissionPresetInfo> permissions;
+  std::string permission_id;
+  std::string permission_name;
   std::vector<HistoryMessage> history;
   std::vector<Question> questions;
   std::vector<TodoItem> todos;

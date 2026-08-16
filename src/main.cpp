@@ -302,6 +302,8 @@ int RunSelfTest() {
       R"({"type":"sessions","sessions":[{"id":"s","title":"标题","cwd":"/tmp","workspaceId":"w"}]})",
       R"({"type":"models","models":[{"provider":"p","id":"m","name":"Model","defaultEffort":"medium","efforts":[{"id":"low","name":"低"},{"id":"medium","name":"中"},{"id":"high","name":"高"}]}]})",
       R"({"type":"presets","presets":[{"id":"standard","name":"标准模式","description":"完整"},{"id":"code","name":"PTC 模式","description":"Code Mode"}]})",
+      R"({"type":"permissions","permissions":[{"id":"read-only","name":"read-only","description":""},{"id":"workspace-write","name":"workspace-write","description":""},{"id":"danger-full-access","name":"danger-full-access","description":""}]})",
+      R"({"type":"permission","id":"workspace-write","name":"workspace-write"})",
       R"({"type":"preset","id":"code","name":"PTC 模式"})",
       R"({"type":"hello","sessionId":"s","model":"m","provider":"p","reasoningEffort":"high","presetId":"code","cwd":"/tmp","resumed":true})",
       R"({"type":"history","messages":[{"role":"user","text":"你好"},{"role":"assistant","text":"你好！"}]})",
@@ -324,7 +326,8 @@ int RunSelfTest() {
   }
   if (state.workspaces.size() != 1 || state.sessions.size() != 1 || !state.resumed ||
       state.models.size() != 1 || state.models[0].efforts.size() != 3 ||
-      state.presets.size() != 2 || state.preset_id != "code" ||
+      state.presets.size() != 2 || state.permissions.size() != 3 ||
+      state.permission_id != "workspace-write" || state.preset_id != "code" ||
       state.preset_name != "PTC 模式" || state.reasoning_effort != "high" ||
       state.stats.context_window != 100 || state.todos.size() != 1 ||
       !state.ask.active || !state.approval.active) {
@@ -401,11 +404,13 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   std::vector<std::string> model_entries;
   std::vector<std::string> reasoning_entries;
   std::vector<std::string> preset_entries;
+  std::vector<std::string> permission_entries;
   int workspace_selected = 0;
   int session_selected = 0;
   int model_selected = 0;
   int reasoning_selected = 0;
   int preset_selected = 0;
+  int permission_selected = 0;
 
   auto RebuildWorkspaceMenu = [&] {
     workspace_entries.clear();
@@ -481,9 +486,26 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       if (state.presets[i].id == state.preset_id) { preset_selected = static_cast<int>(i); break; }
     }
   };
+  auto RebuildPermissionMenu = [&] {
+    permission_entries.clear();
+    for (const auto& permission : state.permissions) {
+      std::string label = permission.name;
+      if (permission.id == "read-only") label = "只读 (read-only)";
+      else if (permission.id == "workspace-write") label = "工作区写入 (workspace-write)";
+      else if (permission.id == "danger-full-access") label = "完全访问 (full access)";
+      if (label.empty()) label = permission.id;
+      permission_entries.push_back(label);
+    }
+    if (permission_entries.empty()) permission_entries.push_back("（读取权限中…）");
+    if (permission_selected >= static_cast<int>(permission_entries.size())) permission_selected = 0;
+    for (size_t i = 0; i < state.permissions.size(); ++i) {
+      if (state.permissions[i].id == state.permission_id) { permission_selected = static_cast<int>(i); break; }
+    }
+  };
   RebuildModelMenu();
   RebuildReasoningMenu();
   RebuildPresetMenu();
+  RebuildPermissionMenu();
 
   MenuOption workspace_option = MenuOption::Vertical();
   workspace_option.on_change = [&] { RebuildSessionMenu(); };
@@ -549,6 +571,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   };
   auto preset_menu = Menu(&preset_entries, &preset_selected, preset_option);
 
+  MenuOption permission_option = MenuOption::Vertical();
+  permission_option.on_enter = [&] {
+    if (permission_selected < 0 || permission_selected >= static_cast<int>(state.permissions.size())) return;
+    OutboundCommand command;
+    command.type = "set-permission";
+    command.text = state.permissions[permission_selected].id;
+    SendCommand(command_fd, command);
+  };
+  auto permission_menu = Menu(&permission_entries, &permission_selected, permission_option);
+
   auto Send = [&](const OutboundCommand& command) {
     if (!SendCommand(command_fd, command)) {
       state.Add(MessageRole::Error, "无法写入 dsh 桥接进程，连接可能已断开。");
@@ -573,6 +605,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       }
       if (event.type == InboundEvent::Type::Presets || event.type == InboundEvent::Type::Preset) {
         RebuildPresetMenu();
+      }
+      if (event.type == InboundEvent::Type::Permissions || event.type == InboundEvent::Type::Permission) {
+        RebuildPermissionMenu();
       }
       if (event.type == InboundEvent::Type::Models || event.type == InboundEvent::Type::Hello) {
         RebuildModelMenu();
@@ -705,7 +740,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   });
   auto new_session_button = Button("＋ 新建会话", NewSessionInWorkspace, ButtonOption::Ascii());
 
-  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, preset_menu, model_menu, reasoning_menu});
+  auto sidebar_container = Container::Vertical({workspace_menu, new_session_button, session_menu, preset_menu, permission_menu, model_menu, reasoning_menu});
   auto main_container = Container::Vertical({input_component});
 
   // User-resizable panes. The terminal can still hide a rail automatically on
@@ -733,6 +768,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     sidebar.push_back(separatorEmpty());
     sidebar.push_back(text("模式") | bold | color(Color::Cyan));
     sidebar.push_back(preset_menu->Render() | yframe);
+    sidebar.push_back(separatorEmpty());
+    sidebar.push_back(text("权限") | bold | color(Color::Cyan));
+    sidebar.push_back(permission_menu->Render() | yframe);
     sidebar.push_back(separatorEmpty());
     sidebar.push_back(text("模型") | bold | color(Color::Cyan));
     sidebar.push_back(model_menu->Render() | yframe);
@@ -778,6 +816,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     } else {
       std::string compact = BridgeStatusText(state);
       if (!state.preset_name.empty()) compact += " · " + state.preset_name;
+      if (!state.permission_name.empty()) compact += " · " + state.permission_name;
       if (!state.model.empty()) compact += " · " + state.model;
       if (!state.reasoning_effort.empty()) compact += " · 思考 " + state.reasoning_effort;
       main_lines.push_back(hbox({

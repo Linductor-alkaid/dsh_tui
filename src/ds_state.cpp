@@ -55,6 +55,8 @@ void DeepSeekState::ResetConversation(const std::string& reason) {
   reasoning_effort.clear();
   preset_id.clear();
   preset_name.clear();
+  permission_id.clear();
+  permission_name.clear();
   if (reason.empty()) {
     Add(MessageRole::Welcome, "会话已切换。输入消息开始。");
   } else {
@@ -101,6 +103,15 @@ void DeepSeekState::Apply(const InboundEvent& event) {
     case InboundEvent::Type::Preset:
       preset_id = event.text;
       preset_name = event.secondary;
+      break;
+
+    case InboundEvent::Type::Permissions:
+      permissions = event.permissions;
+      break;
+
+    case InboundEvent::Type::Permission:
+      permission_id = event.permission_id;
+      permission_name = event.permission_name;
       break;
 
     case InboundEvent::Type::History:

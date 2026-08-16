@@ -116,6 +116,26 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     }
     return event;
   }
+  if (type == "permissions") {
+    event.type = InboundEvent::Type::Permissions;
+    const Json* permissions = json.find("permissions");
+    if (permissions != nullptr && permissions->is_array()) {
+      for (const auto& permission : permissions->as_array()) {
+        PermissionPresetInfo item;
+        item.id = StringField(permission, "id");
+        item.name = StringField(permission, "name");
+        item.description = StringField(permission, "description");
+        event.permissions.push_back(std::move(item));
+      }
+    }
+    return event;
+  }
+  if (type == "permission") {
+    event.type = InboundEvent::Type::Permission;
+    event.permission_id = StringField(json, "id");
+    event.permission_name = StringField(json, "name");
+    return event;
+  }
   if (type == "preset") {
     event.type = InboundEvent::Type::Preset;
     event.text = StringField(json, "id");

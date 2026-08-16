@@ -50,6 +50,9 @@ class DeepSeekState {
   std::vector<SessionInfo> sessions;
   std::vector<ModelInfo> models;
   std::vector<PresetInfo> presets;
+  std::vector<PermissionPresetInfo> permissions;
+  std::string permission_id;
+  std::string permission_name;
   std::string preset_id;
   std::string preset_name;
   std::deque<ChatMessage> messages;

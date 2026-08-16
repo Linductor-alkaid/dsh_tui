@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { DSH_TUI_STARTUP_SERVICE } from "./startup.js";
 
 export const name = "dsh-tui";
-export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions", "agentPresets"];
+export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions", "agentPresets", "permissionPresets"];
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -272,6 +272,28 @@ export function apply(ctx, config) {
     post({ type: "sessions", sessions: snapshot.sessions });
   };
 
+  const postPermissions = async () => {
+    try {
+      const service = ctx.permissionPresets;
+      if (!service) return;
+      const names = service.names ?? [];
+      const permissions = names.map((name) => {
+        try {
+          const option = service.optionOf(name);
+          return { id: option.value, name: option.name ?? name, description: option.description ?? "" };
+        } catch {
+          return { id: name, name, description: "" };
+        }
+      });
+      post({ type: "permissions", permissions });
+      const currentId = liveAgent ? service.current(liveAgent.session.events) : service.defaultPreset;
+      const current = permissions.find((item) => item.id === currentId) ?? permissions[0];
+      if (current) post({ type: "permission", id: current.id, name: current.name });
+    } catch {
+      // Presentation-only; the permission service still pins new sessions.
+    }
+  };
+
   const postPresets = async () => {
     try {
       const presets = await ctx.agentPresets?.list?.() ?? [];
@@ -436,6 +458,22 @@ export function apply(ctx, config) {
           const session = snapshot.sessions.find((item) => item.id === sessionId);
           await switchSession({ resumeSessionId: sessionId, cwd: session?.cwd });
         }
+        break;
+      }
+      case "set-permission": {
+        const name = String(command.text ?? "");
+        if (!name) break;
+        try {
+          if (liveAgent) ctx.permissionPresets.set(liveAgent.session, name);
+          try {
+            await ctx.get("settings")?.replace("permission", { defaultPreset: name });
+          } catch {
+            // Current session is already switched; default persistence is best effort.
+          }
+        } catch (error) {
+          console.error(`dsh-tui: permission preset failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        await postPermissions();
         break;
       }
       case "set-preset": {
@@ -781,6 +819,7 @@ export function apply(ctx, config) {
         }
         postWorkspaces();
         void postPresets();
+        void postPermissions();
         void postModels();
         post({
           type: "history",
