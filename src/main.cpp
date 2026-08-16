@@ -108,7 +108,7 @@ SlashSubmitDecision DecideSlashSubmit(const std::string& input,
   SlashSubmitDecision decision;
   if (input.empty() || input[0] != '/') return decision;
   std::string name = input.substr(1);
-  size_t space = name.find(' ');
+  size_t space = name.find_first_of(" \t\r\n");
   if (space != std::string::npos) name.resize(space);
 
   const CommandInfo* exact = nullptr;
@@ -893,13 +893,13 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
   auto SlashActive = [&] { return !input_text.empty() && input_text[0] == '/'; };
   auto SlashPaletteActive = [&] {
-    return SlashActive() && input_text.find(' ') == std::string::npos;
+    return SlashActive() && input_text.find_first_of(" \t\r\n") == std::string::npos;
   };
 
   auto CommandNameFromInput = [&]() -> std::string {
     if (!SlashActive()) return {};
     std::string rest = input_text.substr(1);
-    size_t space = rest.find(' ');
+    size_t space = rest.find_first_of(" \t\r\n");
     if (space == std::string::npos) return rest;
     return rest.substr(0, space);
   };

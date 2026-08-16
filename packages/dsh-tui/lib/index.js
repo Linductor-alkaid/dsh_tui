@@ -848,13 +848,17 @@ export function apply(ctx, config) {
           detail: event.data.args ?? ""
         });
         break;
-      case "command/done":
-        post({
-          type: "message",
-          role: event.data.kind === "success" ? "system" : "error",
-          text: event.data.text ?? ""
-        });
+      case "command/done": {
+        const text = event.data.text ?? "";
+        if (text !== "") {
+          post({
+            type: "message",
+            role: event.data.kind === "success" ? "system" : "error",
+            text
+          });
+        }
         break;
+      }
       case "session/title":
         sessionTitleOverrides.set(session.id, event.data.title ?? session.id);
         for (const [key, pending] of pendingNewSessions) {
