@@ -548,8 +548,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   workspace_option.on_enter = [&] { /* selection updates session list */ };
   auto workspace_menu = Menu(&workspace_entries, &workspace_selected, workspace_option);
 
-  MenuOption session_option = MenuOption::Vertical();
-  session_option.on_enter = [&] {
+  auto ResumeSelectedSession = [&] {
     std::string session_id;
     if (workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
       const auto& workspace = state.workspaces[workspace_selected];
@@ -567,6 +566,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     SendCommand(command_fd, command);
     input_text.clear();
   };
+
+  MenuOption session_option = MenuOption::Vertical();
+  session_option.on_change = [&] { ResumeSelectedSession(); };
+  session_option.on_enter = [&] { ResumeSelectedSession(); };
   auto session_menu = Menu(&session_entries, &session_selected, session_option);
 
   MenuOption model_option = MenuOption::Vertical();

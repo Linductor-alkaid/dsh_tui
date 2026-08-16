@@ -77,6 +77,8 @@ DSH_LAUNCHER="/path/to/deepseek-dsh-bin" ./scripts/run-tui.sh
 
 - 工作区列表与历史会话列表（读取 `$DSH_HOME/storages/workspace.json`）
 - 新建会话会立即在工作区下显示“新会话”，首次输入后自动更新标题
+- 未输入消息的新会话在切换后仍保留；同一工作区重复点击新建只会复用一个空白会话
+- 点击会话列表项即可恢复并显示历史对话
 - 模式选择：标准模式 / PTC 模式 / 极简模式 / 创造模式（agent presets）
 - 权限设置：只读 / 工作区写入 / 完全访问（sandbox + approval 预设）
 - 模型选择与思考深度选择（读取 dsh llm 目录并写入默认模型）

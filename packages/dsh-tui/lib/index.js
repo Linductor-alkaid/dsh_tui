@@ -50,6 +50,7 @@ function readJsonFile(path, fallback) {
 
 const sessionTitleOverrides = new Map();
 const workspaceSessionExtras = new Map();
+const pendingNewSessions = new Map();
 
 function workspaceSnapshot() {
   const storage = readJsonFile(join(dshHome(), "storages", "workspace.json"), {});
@@ -198,6 +199,7 @@ function historyPayload(events, boundary) {
 export function apply(ctx, config) {
   sessionTitleOverrides.clear();
   workspaceSessionExtras.clear();
+  pendingNewSessions.clear();
   const appExit = ctx.get("appExit");
   if (typeof appExit !== "function") {
     throw new Error("dsh-tui: the launcher must provide ctx.appExit before the tree mounts");
@@ -439,6 +441,10 @@ export function apply(ctx, config) {
           workspaceSessionExtras.set(options.workspaceId, extras);
         }
         sessionTitleOverrides.set(liveAgent.session.id, "新会话");
+        pendingNewSessions.set(options.workspaceId, {
+          sessionId: liveAgent.session.id,
+          cwd: liveAgent.session.header?.cwd ?? process.cwd()
+        });
       }
 
       post({ type: "reset", reason: options.resumeSessionId ? "正在恢复会话…" : "正在创建新会话…" });
@@ -622,7 +628,20 @@ export function apply(ctx, config) {
         const snapshot = workspaceSnapshot();
         const workspaceId = String(command.text ?? "");
         const workspace = snapshot.workspaces.find((item) => item.id === workspaceId);
-        await switchSession({ cwd: workspace?.path ?? process.cwd(), workspaceId });
+        const cwd = workspace?.path ?? process.cwd();
+        const pending = pendingNewSessions.get(workspaceId);
+        if (pending) {
+          if (liveAgent?.session?.id !== pending.sessionId) {
+            try {
+              await switchSession({ resumeSessionId: pending.sessionId, cwd: pending.cwd ?? cwd });
+            } catch {
+              pendingNewSessions.delete(workspaceId);
+              await switchSession({ cwd, workspaceId });
+            }
+          }
+          break;
+        }
+        await switchSession({ cwd, workspaceId });
         break;
       }
       case "answer": {
@@ -713,6 +732,15 @@ export function apply(ctx, config) {
 
   const projectEvent = (session, event) => {
     if (!liveAgent || session !== liveAgent.session) return;
+    const isSessionWork =
+      (event.type === "user/message" && event.data?.source?.kind === "user") ||
+      event.type === "assistant/message" ||
+      event.type === "tool/call";
+    if (isSessionWork) {
+      for (const [key, pending] of pendingNewSessions) {
+        if (pending.sessionId === session.id) pendingNewSessions.delete(key);
+      }
+    }
     switch (event.type) {
       case "user/message":
         if (event.data?.source?.kind === "user") {
@@ -772,6 +800,9 @@ export function apply(ctx, config) {
         break;
       case "session/title":
         sessionTitleOverrides.set(session.id, event.data.title ?? session.id);
+        for (const [key, pending] of pendingNewSessions) {
+          if (pending.sessionId === session.id) pendingNewSessions.delete(key);
+        }
         postWorkspaces();
         break;
       default:
