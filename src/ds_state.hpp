@@ -52,6 +52,7 @@ class DeepSeekState {
   std::vector<ModelInfo> models;
   std::vector<PresetInfo> presets;
   std::vector<PermissionPresetInfo> permissions;
+  std::vector<CommandInfo> commands;
   std::string permission_id;
   std::string permission_name;
   std::string preset_id;

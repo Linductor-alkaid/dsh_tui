@@ -324,6 +324,7 @@ int RunSelfTest() {
       R"({"type":"models","models":[{"provider":"p","id":"m","name":"Model","defaultEffort":"medium","efforts":[{"id":"low","name":"低"},{"id":"medium","name":"中"},{"id":"high","name":"高"}]}]})",
       R"({"type":"presets","presets":[{"id":"standard","name":"标准模式","description":"完整"},{"id":"code","name":"PTC 模式","description":"Code Mode"}]})",
       R"({"type":"permissions","permissions":[{"id":"read-only","name":"read-only","description":""},{"id":"workspace-write","name":"workspace-write","description":""},{"id":"danger-full-access","name":"danger-full-access","description":""}]})",
+      R"({"type":"commands","commands":[{"name":"compact","description":"Compact older conversation history","hint":""},{"name":"goal","description":"set or view the goal","hint":"[objective]"}]})",
       R"({"type":"permission","id":"workspace-write","name":"workspace-write"})",
       R"({"type":"preset","id":"code","name":"PTC 模式"})",
       R"({"type":"hello","sessionId":"s","model":"m","provider":"p","reasoningEffort":"high","presetId":"code","cwd":"/tmp","resumed":true})",
@@ -348,6 +349,8 @@ int RunSelfTest() {
   if (state.workspaces.size() != 1 || state.sessions.size() != 1 || !state.resumed ||
       state.models.size() != 1 || state.models[0].efforts.size() != 3 ||
       state.presets.size() != 2 || state.permissions.size() != 3 ||
+      state.commands.size() != 2 || state.commands[0].name != "compact" ||
+      state.commands[1].name != "goal" ||
       state.permission_id != "workspace-write" || state.preset_id != "code" ||
       state.preset_name != "PTC 模式" || state.reasoning_effort != "high" ||
       state.messages.empty() ||
@@ -748,6 +751,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   std::set<size_t> expanded_reasoning;
   size_t active_reasoning = std::string::npos;
   std::vector<ftxui::Box> reasoning_click_boxes;
+  std::vector<size_t> command_matches;
+  int command_match_selected = -1;
+  std::vector<ftxui::Box> command_palette_boxes;
 
   auto MoveActiveReasoning = [&](int direction) {
     if (state.messages.empty()) return;
@@ -779,11 +785,55 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     else expanded_reasoning.insert(active_reasoning);
   };
 
+  auto SlashActive = [&] { return !input_text.empty() && input_text[0] == '/'; };
+
+  auto CommandNameFromInput = [&]() -> std::string {
+    if (!SlashActive()) return {};
+    std::string rest = input_text.substr(1);
+    size_t space = rest.find(' ');
+    if (space == std::string::npos) return rest;
+    return rest.substr(0, space);
+  };
+
+  auto RefreshCommandMatches = [&] {
+    command_matches.clear();
+    command_match_selected = -1;
+    command_palette_boxes.clear();
+    if (!SlashActive()) return;
+    std::string name = CommandNameFromInput();
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+    for (size_t i = 0; i < state.commands.size(); ++i) {
+      std::string candidate = state.commands[i].name;
+      if (candidate.substr(0, lower.size()) == lower) command_matches.push_back(i);
+    }
+    if (!command_matches.empty()) command_match_selected = 0;
+  };
+
   auto Submit = [&] {
     if (state.closed || !state.hello_seen) return;
     if (state.approval.active) AnswerApproval();
     else if (state.ask.active) AnswerCurrentQuestion();
-    else {
+    else if (SlashActive()) {
+      std::string name = CommandNameFromInput();
+      bool exact = false;
+      for (const auto& command : state.commands) {
+        if (command.name == name) { exact = true; break; }
+      }
+      if (exact) {
+        OutboundCommand command;
+        command.type = "run-command";
+        command.text = input_text;
+        Send(command);
+      } else if (!command_matches.empty()) {
+        const CommandInfo& suggestion = state.commands[command_matches[command_match_selected < 0 ? 0 : command_match_selected]];
+        input_text = "/" + suggestion.name + " ";
+        RefreshCommandMatches();
+        return;
+      } else {
+        state.Add(MessageRole::Error, "未知命令：" + input_text);
+      }
+    } else {
       std::string prompt = Trim(input_text);
       if (prompt.empty()) return;
       OutboundCommand command;
@@ -821,6 +871,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (event.is_mouse() && event.mouse().button == Mouse::WheelDown) {
       scroll_anchor = std::min(1.0, scroll_anchor + 0.08);
       if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
+      return true;
+    }
+    if (event == Event::Tab && SlashActive() && !command_matches.empty()) {
+      if (command_match_selected < 0) command_match_selected = 0;
+      else command_match_selected = (command_match_selected + 1) % static_cast<int>(command_matches.size());
+      const CommandInfo& suggestion = state.commands[command_matches[command_match_selected]];
+      input_text = "/" + suggestion.name + " ";
+      RefreshCommandMatches();
       return true;
     }
     return false;
@@ -893,6 +951,29 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     Element history = vbox(std::move(messages)) | focusPositionRelative(0.0f, anchor) |
                       yframe | vscroll_indicator | flex;
 
+    RefreshCommandMatches();
+    Element command_palette = emptyElement();
+    if (SlashActive() && !command_matches.empty()) {
+      command_palette_boxes.assign(command_matches.size(), ftxui::Box{});
+      Elements command_rows;
+      for (size_t i = 0; i < command_matches.size(); ++i) {
+        const CommandInfo& command = state.commands[command_matches[i]];
+        const bool selected = static_cast<int>(i) == command_match_selected;
+        Element row = hbox({
+            text(selected ? "❯ /" + command.name : "  /" + command.name) |
+                bold | color(selected ? Color::Cyan : Color::White),
+            text(command.hint.empty() ? "" : " " + command.hint) | dim,
+            filler(),
+        });
+        row = row | reflect(command_palette_boxes[i]);
+        command_rows.push_back(row);
+        command_rows.push_back(paragraph("    " + command.description) | dim);
+      }
+      command_palette = window(text(" 命令 "), vbox(std::move(command_rows)));
+    } else if (SlashActive()) {
+      command_palette = window(text(" 命令 "), text("未知命令") | color(Color::Red));
+    }
+
     Element question_panel = QuestionPanel(state);
     Elements main_lines;
     if (status_width > 0) {
@@ -924,6 +1005,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     main_lines.push_back(separator());
     main_lines.push_back(history);
+    if (SlashActive()) {
+      main_lines.push_back(separator());
+      main_lines.push_back(command_palette);
+    }
     if (state.ask.active || state.approval.active) {
       main_lines.push_back(separator());
       main_lines.push_back(question_panel);
@@ -998,6 +1083,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto main_component = CatchEvent(renderer, [&](Event event) {
     if (event.is_mouse() && event.mouse().button == Mouse::Left &&
         event.mouse().motion == Mouse::Pressed) {
+      if (SlashActive()) {
+        for (size_t i = 0; i < command_palette_boxes.size() && i < command_matches.size(); ++i) {
+          if (command_palette_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
+            const CommandInfo& command = state.commands[command_matches[i]];
+            input_text = "/" + command.name + " ";
+            RefreshCommandMatches();
+            return true;
+          }
+        }
+      }
       for (size_t i = 0; i < reasoning_click_boxes.size() && i < state.messages.size(); ++i) {
         if (!state.messages[i].reasoning.empty() &&
             reasoning_click_boxes[i].Contain(event.mouse().x, event.mouse().y)) {

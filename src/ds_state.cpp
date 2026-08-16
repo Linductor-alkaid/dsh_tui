@@ -109,6 +109,10 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       permissions = event.permissions;
       break;
 
+    case InboundEvent::Type::Commands:
+      commands = event.commands;
+      break;
+
     case InboundEvent::Type::Permission:
       permission_id = event.permission_id;
       permission_name = event.permission_name;

@@ -116,6 +116,20 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     }
     return event;
   }
+  if (type == "commands") {
+    event.type = InboundEvent::Type::Commands;
+    const Json* commands = json.find("commands");
+    if (commands != nullptr && commands->is_array()) {
+      for (const auto& command : commands->as_array()) {
+        CommandInfo item;
+        item.name = StringField(command, "name");
+        item.description = StringField(command, "description");
+        item.hint = StringField(command, "hint");
+        event.commands.push_back(std::move(item));
+      }
+    }
+    return event;
+  }
   if (type == "permissions") {
     event.type = InboundEvent::Type::Permissions;
     const Json* permissions = json.find("permissions");

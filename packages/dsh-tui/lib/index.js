@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { DSH_TUI_STARTUP_SERVICE } from "./startup.js";
 
 export const name = "dsh-tui";
-export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions", "agentPresets", "permissionPresets"];
+export const inject = [DSH_TUI_STARTUP_SERVICE, "userQuestions", "agentPresets", "permissionPresets", "commands"];
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -333,6 +333,23 @@ export function apply(ctx, config) {
     }
   };
 
+  const postCommands = () => {
+    try {
+      if (!liveAgent || !ctx.commands) return;
+      const commands = ctx.commands.list(liveAgent) ?? [];
+      post({
+        type: "commands",
+        commands: commands.map((command) => ({
+          name: command.name,
+          description: command.description ?? "",
+          hint: command.input?.hint ?? ""
+        }))
+      });
+    } catch {
+      // Slash commands are an optional UI feature.
+    }
+  };
+
   const postPresets = async () => {
     try {
       const presets = await ctx.agentPresets?.list?.() ?? [];
@@ -465,6 +482,7 @@ export function apply(ctx, config) {
       });
       post({ type: "status", status: liveAgent.status });
       postStats();
+      postCommands();
 
       for (const prompt of pendingPrompts.splice(0)) {
         liveAgent.followup(prompt);
@@ -508,6 +526,33 @@ export function apply(ctx, config) {
           const snapshot = workspaceSnapshot();
           const session = snapshot.sessions.find((item) => item.id === sessionId);
           await switchSession({ resumeSessionId: sessionId, cwd: session?.cwd });
+        }
+        break;
+      }
+      case "run-command": {
+        const line = String(command.text ?? "");
+        if (!line.startsWith("/") || !liveAgent) {
+          post({ type: "message", role: "error", text: "Not a slash command." });
+          break;
+        }
+        try {
+          const execution = await ctx.commands.execute(liveAgent, line, new AbortController().signal);
+          if (!execution) {
+            post({ type: "message", role: "error", text: `Unknown command: ${line}` });
+            break;
+          }
+          const result = execution.result;
+          post({
+            type: "message",
+            role: result.kind === "success" ? "system" : "error",
+            text: result.text ?? ""
+          });
+        } catch (error) {
+          post({
+            type: "message",
+            role: "error",
+            text: error instanceof Error ? error.message : String(error)
+          });
         }
         break;
       }
@@ -895,6 +940,7 @@ export function apply(ctx, config) {
       closeListeners.push(offApproval);
       closeListeners.push(ctx.on("session/event", projectEvent));
       closeListeners.push(ctx.on("agent/status", projectStatus));
+      closeListeners.push(ctx.on("commands/change", () => postCommands()));
 
       await switchSession(config.resumeSessionId ? { resumeSessionId: config.resumeSessionId } : {});
       if (liveAgent) {
@@ -908,6 +954,7 @@ export function apply(ctx, config) {
         void postPresets();
         void postPermissions();
         void postModels();
+        postCommands();
         post({
           type: "history",
           messages: historyPayload(liveAgent.session.events, liveAgent.session.firstLiveSeq)
