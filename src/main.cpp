@@ -844,13 +844,21 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       }
       std::string trimmed_line = Trim(input_text);
       bool bare = trimmed_line.find(' ') == std::string::npos;
-      if (exact_command != nullptr && (bare || !exact_command->hint.empty())) {
+      if (exact_command != nullptr && bare && !exact_command->hint.empty()) {
+        // WebUI leadingInput claim: `/goal` or `/feedback` alone claims the
+        // token and waits for the user's argument instead of executing.
+        input_text = "/" + exact_command->name + " ";
+        RefreshCommandMatches();
+        return;
+      }
+      if (exact_command != nullptr && ((bare && exact_command->hint.empty()) ||
+                                        (!bare && !exact_command->hint.empty()))) {
         OutboundCommand command;
         command.type = "run-command";
         command.text = input_text;
         Send(command);
       } else if (exact_command != nullptr && !bare && exact_command->hint.empty()) {
-        // WebUI leaves non-bare no-argument commands unclaimed, so the line is
+        // WebUI leaves non-bare no-argument commands unclaimed; the line is
         // sent as an ordinary prompt instead of being executed.
         OutboundCommand command;
         command.type = "prompt";
@@ -869,7 +877,12 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
           return;
         }
       } else {
-        state.Add(MessageRole::Error, "未知命令：" + input_text);
+        // WebUI default sink: an unclaimed slash line is submitted as a normal
+        // user message instead of being rejected by the composer.
+        OutboundCommand command;
+        command.type = "prompt";
+        command.text = std::move(trimmed_line);
+        Send(command);
       }
     } else {
       std::string prompt = Trim(input_text);
