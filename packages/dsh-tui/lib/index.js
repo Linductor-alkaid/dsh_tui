@@ -183,12 +183,20 @@ function surfaceItemFor(event) {
   }
 }
 
-function historyPayload(events, boundary) {
+function historyPayload(session) {
   const messages = [];
-  for (const event of events) {
-    if (event.seq >= boundary) break;
-    const item = surfaceItemFor(event);
-    if (item) messages.push(item);
+  const nodes = session?.surface?.nodes;
+  if (Array.isArray(nodes)) {
+    for (const seq of nodes) {
+      const event = session.events[seq];
+      const item = event === undefined ? undefined : surfaceItemFor(event);
+      if (item) messages.push(item);
+    }
+  } else {
+    for (const event of session?.events ?? []) {
+      const item = surfaceItemFor(event);
+      if (item) messages.push(item);
+    }
   }
   if (messages.length > 400) {
     return [{ role: "system", text: "…(仅显示最近 400 条历史消息)" }, ...messages.slice(-400)];
@@ -468,7 +476,7 @@ export function apply(ctx, config) {
       postWorkspaces();
       post({
         type: "history",
-        messages: historyPayload(liveAgent.session.events, liveAgent.session.firstLiveSeq)
+        messages: historyPayload(liveAgent.session)
       });
       post({
         type: "hello",
@@ -840,6 +848,11 @@ export function apply(ctx, config) {
         contextWindow = event.data.contextWindow ?? contextWindow;
         postStats();
         break;
+      case "compaction/end":
+      case "compaction/prune":
+        post({ type: "reset", reason: "会话历史已压缩" });
+        post({ type: "history", messages: historyPayload(liveAgent.session) });
+        break;
       case "command/run":
         post({
           type: "tool",
@@ -973,7 +986,7 @@ export function apply(ctx, config) {
         postCommands();
         post({
           type: "history",
-          messages: historyPayload(liveAgent.session.events, liveAgent.session.firstLiveSeq)
+          messages: historyPayload(liveAgent.session)
         });
         post({
           type: "hello",
