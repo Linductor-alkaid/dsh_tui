@@ -46,6 +46,7 @@ void PrintUsage() {
       << "  dsh_tui [--resume <id>]  # 自启 dsh，恢复指定会话\n"
       << "  dsh_tui --child          # 由 dsh-tui profile 桥接进程启动\n"
       << "  dsh_tui --demo           # 无 dsh 进程的可视化演示\n"
+      << "  dsh_tui --slash-demo     # 渲染 / 命令面板到 stdout\n"
       << "  dsh_tui --self-test      # 无 TTY 的协议/状态自检\n"
       << "  dsh_tui --help\n\n"
       << "请勿把这里的 dsh 与 apt 的 dancer's distributed shell 混淆；\n"
@@ -428,6 +429,25 @@ class DemoReader final : public executor::IBlockingIoWorker {
   executor::comm::MpscChannel<InboundEvent>* events_;
   ftxui::App* screen_;
 };
+
+int RunSlashDemo() {
+  std::vector<CommandInfo> commands = {
+      {"compact", "Compact older conversation history", ""},
+      {"feedback", "record feedback about this session", "<text>"},
+      {"goal", "set or view the goal for a long-running task",
+       "[<objective>|clear|edit <objective>|pause|resume]"},
+      {"permission", "Switch the permission preset (sandbox mode + approval policy)",
+       "<preset>"},
+      {"plan", "Enter or leave plan mode", "[off|message]"},
+  };
+  std::vector<size_t> matches = {0, 1, 2, 3, 4};
+  std::vector<ftxui::Box> boxes;
+  ftxui::Element palette = BuildCommandPaletteElement(commands, matches, 0, boxes);
+  ftxui::Screen screen(80, 14);
+  ftxui::Render(screen, palette);
+  std::cout << screen.ToString() << "\n";
+  return 0;
+}
 
 int RunSelfTest() {
   std::vector<std::string> samples = {
@@ -1556,12 +1576,14 @@ int RunDemoMode() {
 int Main(int argc, char** argv) {
   bool child_mode = false;
   bool demo_mode = false;
+  bool slash_demo_mode = false;
   bool self_test = false;
   std::string resume_session_id;
   for (int i = 1; i < argc; ++i) {
     std::string_view arg = argv[i];
     if (arg == "--child") child_mode = true;
     else if (arg == "--demo") demo_mode = true;
+    else if (arg == "--slash-demo") slash_demo_mode = true;
     else if (arg == "--self-test") self_test = true;
     else if (arg == "--resume" && i + 1 < argc) resume_session_id = argv[++i];
     else if (arg == "--help" || arg == "-h") { PrintUsage(); return 0; }
@@ -1569,6 +1591,7 @@ int Main(int argc, char** argv) {
     else { std::cerr << "dsh_tui: unknown argument: " << arg << "\n\n"; PrintUsage(); return 2; }
   }
   if (self_test) return RunSelfTest();
+  if (slash_demo_mode) return RunSlashDemo();
   if (demo_mode) return RunDemoMode();
   if (child_mode) return RunChildMode();
   return RunStandaloneMode(resume_session_id);
