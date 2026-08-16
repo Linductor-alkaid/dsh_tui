@@ -80,7 +80,8 @@ DSH_LAUNCHER="/path/to/deepseek-dsh-bin" ./scripts/run-tui.sh
 - 权限设置：只读 / 工作区写入 / 完全访问（sandbox + approval 预设）
 - 模型选择与思考深度选择（读取 dsh llm 目录并写入默认模型）
 - 新建会话 / `--resume <id>` 恢复会话 / 运行中切换会话
-- 流式文本与 reasoning 展示、工具调用卡片
+- 流式文本展示；reasoning 默认折叠，`Ctrl+E` 展开/收起，`Ctrl+↑/↓` 选择思考块
+- 会话历史支持 PgUp/PgDn/鼠标滚轮滚动；吸底时自动跟随新输出
 - `ask_user_question` 与 approval 交互
 - 状态面板：模型、cwd、token、上下文窗口、回合/步骤、LLM/工具/首 token 耗时、待办
 - Esc / Ctrl+C 停止当前回合，Ctrl+N 新建会话，Ctrl+Q 退出

@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -81,7 +82,9 @@ std::string BridgeStatusText(const DeepSeekState& state) {
   return "◌ 桥接中…";
 }
 
-Element RenderMessage(const ChatMessage& message) {
+Element RenderMessage(const ChatMessage& message, size_t index = 0,
+                        const std::set<size_t>* expanded_reasoning = nullptr,
+                        size_t active_reasoning = std::string::npos) {
   Color tint = Color::White;
   std::string label = "·";
   switch (message.role) {
@@ -94,6 +97,20 @@ Element RenderMessage(const ChatMessage& message) {
   }
   Elements lines;
   lines.push_back(text(" " + label + (message.streaming ? " ▍" : "")) | bold | color(tint));
+  if (!message.reasoning.empty()) {
+    const bool expanded = expanded_reasoning != nullptr && expanded_reasoning->count(index) != 0;
+    const bool active = active_reasoning == index;
+    lines.push_back(hbox({
+        text(expanded ? "  ▾ 思考过程" : "  ▸ 思考过程") |
+            bold | color(active ? Color::Cyan : Color::GrayDark),
+        text("  " + std::to_string(message.reasoning.size()) + " 字") | dim,
+        active ? text("  ←") | color(Color::Cyan) : text(""),
+        filler(),
+    }));
+    if (expanded) {
+      lines.push_back(paragraph(message.reasoning) | dim | border);
+    }
+  }
   lines.push_back(paragraph(message.text) | color(tint));
   return vbox(std::move(lines));
 }
@@ -239,8 +256,8 @@ class DemoReader final : public executor::IBlockingIoWorker {
     InboundEvent history;
     history.type = InboundEvent::Type::History;
     history.history = {
-        {"user", "用第三方 TUI 组件做一个和 WebUI 相同视觉框架的 dsh 界面"},
-        {"assistant", "我会把会话、工作区、状态和 token 使用都放进三栏布局。"},
+        {"user", "用第三方 TUI 组件做一个和 WebUI 相同视觉框架的 dsh 界面", ""},
+        {"assistant", "我会把会话、工作区、状态和 token 使用都放进三栏布局。", "这里是一段被折叠的思考过程，按 Ctrl+E 可以展开。"},
     };
     send(std::move(history));
 
@@ -306,7 +323,7 @@ int RunSelfTest() {
       R"({"type":"permission","id":"workspace-write","name":"workspace-write"})",
       R"({"type":"preset","id":"code","name":"PTC 模式"})",
       R"({"type":"hello","sessionId":"s","model":"m","provider":"p","reasoningEffort":"high","presetId":"code","cwd":"/tmp","resumed":true})",
-      R"({"type":"history","messages":[{"role":"user","text":"你好"},{"role":"assistant","text":"你好！"}]})",
+      R"({"type":"history","messages":[{"role":"user","text":"你好"},{"role":"assistant","text":"你好！","reasoning":"思考过程"}]})",
       R"({"type":"status","status":"running"})",
       R"({"type":"delta","part":"text","text":"流式"})",
       R"({"type":"message","role":"assistant","text":"流式完成"})",
@@ -329,6 +346,10 @@ int RunSelfTest() {
       state.presets.size() != 2 || state.permissions.size() != 3 ||
       state.permission_id != "workspace-write" || state.preset_id != "code" ||
       state.preset_name != "PTC 模式" || state.reasoning_effort != "high" ||
+      state.messages.empty() ||
+      std::none_of(state.messages.begin(), state.messages.end(), [](const auto& m) {
+        return m.reasoning == "思考过程";
+      }) ||
       state.stats.context_window != 100 || state.todos.size() != 1 ||
       !state.ask.active || !state.approval.active) {
     std::cerr << "state assertions failed\n";
@@ -704,6 +725,38 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
   bool stick_to_bottom = true;
   double scroll_anchor = 1.0;
+  std::set<size_t> expanded_reasoning;
+  size_t active_reasoning = std::string::npos;
+
+  auto MoveActiveReasoning = [&](int direction) {
+    if (state.messages.empty()) return;
+    size_t cursor = active_reasoning;
+    if (cursor == std::string::npos) cursor = direction > 0 ? 0 : state.messages.size() - 1;
+    for (size_t step = 0; step < state.messages.size(); ++step) {
+      cursor = (cursor + state.messages.size() + direction) % state.messages.size();
+      if (!state.messages[cursor].reasoning.empty()) {
+        active_reasoning = cursor;
+        return;
+      }
+    }
+    active_reasoning = std::string::npos;
+  };
+
+  auto ToggleActiveReasoning = [&] {
+    if (active_reasoning == std::string::npos || active_reasoning >= state.messages.size() ||
+        state.messages[active_reasoning].reasoning.empty()) {
+      // Select the most recent thinking block when none is selected.
+      for (size_t i = state.messages.size(); i > 0; --i) {
+        if (!state.messages[i - 1].reasoning.empty()) {
+          active_reasoning = i - 1;
+          break;
+        }
+      }
+      if (active_reasoning == std::string::npos) return;
+    }
+    if (expanded_reasoning.count(active_reasoning) != 0) expanded_reasoning.erase(active_reasoning);
+    else expanded_reasoning.insert(active_reasoning);
+  };
 
   auto Submit = [&] {
     if (state.closed || !state.hello_seen) return;
@@ -733,6 +786,19 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (event == Event::PageUp) { stick_to_bottom = false; scroll_anchor = std::max(0.0, scroll_anchor - 0.12); return true; }
     if (event == Event::PageDown) {
       scroll_anchor = std::min(1.0, scroll_anchor + 0.12);
+      if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
+      return true;
+    }
+    if (event == Event::CtrlE) { ToggleActiveReasoning(); return true; }
+    if (event == Event::ArrowUpCtrl) { MoveActiveReasoning(-1); return true; }
+    if (event == Event::ArrowDownCtrl) { MoveActiveReasoning(1); return true; }
+    if (event.is_mouse() && event.mouse().button == Mouse::WheelUp) {
+      stick_to_bottom = false;
+      scroll_anchor = std::max(0.0, scroll_anchor - 0.08);
+      return true;
+    }
+    if (event.is_mouse() && event.mouse().button == Mouse::WheelDown) {
+      scroll_anchor = std::min(1.0, scroll_anchor + 0.08);
       if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
       return true;
     }
@@ -788,9 +854,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   });
 
   auto BuildMain = [&] {
+    if (active_reasoning == std::string::npos) {
+      for (size_t i = state.messages.size(); i > 0; --i) {
+        if (!state.messages[i - 1].reasoning.empty()) { active_reasoning = i - 1; break; }
+      }
+    }
     Elements messages;
     for (size_t i = 0; i < state.messages.size(); ++i) {
-      messages.push_back(RenderMessage(state.messages[i]));
+      messages.push_back(RenderMessage(state.messages[i], i, &expanded_reasoning, active_reasoning));
       if (i + 1 < state.messages.size()) messages.push_back(separatorEmpty());
     }
     if (messages.empty()) messages.push_back(text("（暂无消息）") | dim | center);
@@ -840,7 +911,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_component->Render() | flex,
     }));
     main_lines.push_back(hbox({
-        text(std::string("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn/Home/End 历史") +
+        text(std::string("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn 历史 · Ctrl+E 思考") +
                  (retry_available ? " · Ctrl+R 重连" : "") + " · Ctrl+Q 退出") | dim,
         filler(),
         text(BridgeStatusText(state)) |

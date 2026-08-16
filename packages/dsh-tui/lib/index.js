@@ -130,12 +130,25 @@ function messageSummary(message) {
   return truncate(contentToText(message.content), 6000);
 }
 
+function visibleText(content) {
+  return (content ?? []).filter((block) => block?.type === "text").map((block) => block.text ?? "").join("");
+}
+
+function reasoningText(content) {
+  return (content ?? []).filter((block) => block?.type === "reasoning").map((block) => block.text ?? "").join("\n");
+}
+
 function surfaceItemFor(event) {
   switch (event.type) {
     case "user/message":
-      return { role: "user", text: messageSummary(event.data) };
+      if (event.data?.source?.kind !== "user") return undefined;
+      return { role: "user", text: visibleText(event.data.content) };
     case "assistant/message":
-      return { role: "assistant", text: messageSummary(event.data.message) };
+      return {
+        role: "assistant",
+        text: truncate(visibleText(event.data.message.content), 6000),
+        reasoning: truncate(reasoningText(event.data.message.content), 6000)
+      };
     case "tool/call":
       return { role: "tool", text: `调用工具 ${event.data.name}\n${truncate(event.data.arguments, 4000)}` };
     case "tool/result": {
@@ -670,7 +683,9 @@ export function apply(ctx, config) {
     if (!liveAgent || session !== liveAgent.session) return;
     switch (event.type) {
       case "user/message":
-        post({ type: "message", role: "user", text: messageSummary(event.data) });
+        if (event.data?.source?.kind === "user") {
+          post({ type: "message", role: "user", text: visibleText(event.data.content) });
+        }
         break;
       case "assistant/chunk": {
         const chunk = event.data.chunk;
@@ -686,7 +701,12 @@ export function apply(ctx, config) {
           usageTotals.cacheReadTokens += usage.cacheReadTokens ?? 0;
           usageTotals.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
         }
-        post({ type: "message", role: "assistant", text: messageSummary(event.data.message) });
+        post({
+          type: "message",
+          role: "assistant",
+          text: truncate(visibleText(event.data.message.content), 6000),
+          reasoning: truncate(reasoningText(event.data.message.content), 6000)
+        });
         postStats();
         break;
       }

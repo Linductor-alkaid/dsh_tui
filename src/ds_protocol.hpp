@@ -55,6 +55,7 @@ struct SessionInfo {
 struct HistoryMessage {
   std::string role;  // user | assistant | tool | system
   std::string text;
+  std::string reasoning;
 };
 
 struct Question {

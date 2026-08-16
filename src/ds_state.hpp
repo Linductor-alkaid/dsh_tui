@@ -14,6 +14,7 @@ enum class MessageRole { Welcome, User, Assistant, Tool, System, Error };
 struct ChatMessage {
   MessageRole role = MessageRole::System;
   std::string text;
+  std::string reasoning;
   bool streaming = false;
 };
 

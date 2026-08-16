@@ -175,6 +175,7 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
         HistoryMessage item;
         item.role = StringField(message, "role");
         item.text = StringField(message, "text");
+        item.reasoning = StringField(message, "reasoning");
         if (item.role.empty()) item.role = "system";
         event.history.push_back(std::move(item));
       }
@@ -185,6 +186,7 @@ std::optional<InboundEvent> ParseInboundEvent(const Json& json) {
     event.type = InboundEvent::Type::Message;
     event.text = StringField(json, "role");
     event.secondary = StringField(json, "text");
+    event.detail = StringField(json, "reasoning");
     return event;
   }
   if (type == "delta") {

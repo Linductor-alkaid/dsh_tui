@@ -39,7 +39,7 @@ void DeepSeekState::Add(MessageRole role, std::string text, bool streaming) {
     messages.back().text = ClampText(messages.back().text);
     return;
   }
-  messages.push_back(ChatMessage{role, ClampText(std::move(text)), streaming});
+  messages.push_back(ChatMessage{role, ClampText(std::move(text)), "", streaming});
   while (messages.size() > 600) messages.pop_front();
 }
 
@@ -121,7 +121,11 @@ void DeepSeekState::Apply(const InboundEvent& event) {
         if (item.role == "user") role = MessageRole::User;
         else if (item.role == "assistant") role = MessageRole::Assistant;
         else if (item.role == "tool") role = MessageRole::Tool;
-        messages.push_back(ChatMessage{role, ClampText(item.text), false});
+        ChatMessage message;
+        message.role = role;
+        message.text = ClampText(item.text);
+        message.reasoning = ClampText(item.reasoning);
+        messages.push_back(std::move(message));
       }
       if (messages.empty()) Add(MessageRole::Welcome, "会话为空。输入消息开始。");
       break;
@@ -133,9 +137,14 @@ void DeepSeekState::Apply(const InboundEvent& event) {
         if (!messages.empty() && messages.back().role == MessageRole::Assistant &&
             messages.back().streaming) {
           messages.back().text = event.secondary;
+          messages.back().reasoning = event.detail;
           messages.back().streaming = false;
         } else {
-          Add(MessageRole::Assistant, event.secondary);
+          ChatMessage message;
+          message.role = MessageRole::Assistant;
+          message.text = event.secondary;
+          message.reasoning = event.detail;
+          messages.push_back(std::move(message));
         }
       } else {
         Add(MessageRole::System, event.secondary);
@@ -143,9 +152,21 @@ void DeepSeekState::Apply(const InboundEvent& event) {
       break;
 
     case InboundEvent::Type::Delta:
-      Add(MessageRole::Assistant, event.text == "reasoning" ? "〖思考〗" + event.secondary
-                                                             : event.secondary,
-          true);
+      if (event.text == "reasoning") {
+        if (!messages.empty() && messages.back().role == MessageRole::Assistant &&
+            messages.back().streaming) {
+          messages.back().reasoning += event.secondary;
+          messages.back().reasoning = ClampText(messages.back().reasoning);
+        } else {
+          ChatMessage message;
+          message.role = MessageRole::Assistant;
+          message.reasoning = event.secondary;
+          message.streaming = true;
+          messages.push_back(std::move(message));
+        }
+      } else {
+        Add(MessageRole::Assistant, event.secondary, true);
+      }
       break;
 
     case InboundEvent::Type::Tool:
