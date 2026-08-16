@@ -538,15 +538,11 @@ export function apply(ctx, config) {
         try {
           const execution = await ctx.commands.execute(liveAgent, line, new AbortController().signal);
           if (!execution) {
-            post({ type: "message", role: "error", text: `Unknown command: ${line}` });
-            break;
+            // WebUI admission miss: the command never entered a handler.
+            post({ type: "message", role: "error", text: `unknown or malformed command: ${line}` });
           }
-          const result = execution.result;
-          post({
-            type: "message",
-            role: result.kind === "success" ? "system" : "error",
-            text: result.text ?? ""
-          });
+          // Admitted commands render from the durable `command/run` and
+          // `command/done` session events, exactly like the WebUI flow nodes.
         } catch (error) {
           post({
             type: "message",
@@ -842,6 +838,21 @@ export function apply(ctx, config) {
       case "request/context":
         contextWindow = event.data.contextWindow ?? contextWindow;
         postStats();
+        break;
+      case "command/run":
+        post({
+          type: "tool",
+          phase: "call",
+          name: "/" + event.data.name,
+          detail: event.data.args ?? ""
+        });
+        break;
+      case "command/done":
+        post({
+          type: "message",
+          role: event.data.kind === "success" ? "system" : "error",
+          text: event.data.text ?? ""
+        });
         break;
       case "session/title":
         sessionTitleOverrides.set(session.id, event.data.title ?? session.id);

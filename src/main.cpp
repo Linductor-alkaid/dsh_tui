@@ -795,6 +795,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     return rest.substr(0, space);
   };
 
+  auto IsSubsequence = [](const std::string& query, const std::string& value) {
+    size_t pos = 0;
+    for (char c : value) {
+      if (pos < query.size() && c == query[pos]) ++pos;
+    }
+    return pos == query.size();
+  };
+
   auto RefreshCommandMatches = [&] {
     command_matches.clear();
     command_match_selected = -1;
@@ -803,9 +811,20 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     std::string name = CommandNameFromInput();
     std::string lower = name;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
-    for (size_t i = 0; i < state.commands.size(); ++i) {
-      std::string candidate = state.commands[i].name;
-      if (candidate.substr(0, lower.size()) == lower) command_matches.push_back(i);
+    if (lower.empty()) {
+      for (size_t i = 0; i < state.commands.size(); ++i) command_matches.push_back(i);
+    } else {
+      std::vector<std::pair<int, size_t>> ranked;
+      for (size_t i = 0; i < state.commands.size(); ++i) {
+        std::string candidate = state.commands[i].name;
+        bool prefix = candidate.substr(0, lower.size()) == lower;
+        bool fuzzy = IsSubsequence(lower, candidate);
+        if (!prefix && !fuzzy) continue;
+        int rank = prefix ? 0 : 1;
+        ranked.push_back({rank * 1000 + static_cast<int>(candidate.size()), i});
+      }
+      std::sort(ranked.begin(), ranked.end());
+      for (const auto& [score, index] : ranked) command_matches.push_back(index);
     }
     if (!command_matches.empty()) command_match_selected = 0;
   };
@@ -816,14 +835,23 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     else if (state.ask.active) AnswerCurrentQuestion();
     else if (SlashActive()) {
       std::string name = CommandNameFromInput();
-      bool exact = false;
+      const CommandInfo* exact_command = nullptr;
       for (const auto& command : state.commands) {
-        if (command.name == name) { exact = true; break; }
+        if (command.name == name) { exact_command = &command; break; }
       }
-      if (exact) {
+      std::string trimmed_line = Trim(input_text);
+      bool bare = trimmed_line.find(' ') == std::string::npos;
+      if (exact_command != nullptr && (bare || !exact_command->hint.empty())) {
         OutboundCommand command;
         command.type = "run-command";
         command.text = input_text;
+        Send(command);
+      } else if (exact_command != nullptr && !bare && exact_command->hint.empty()) {
+        // WebUI leaves non-bare no-argument commands unclaimed, so the line is
+        // sent as an ordinary prompt instead of being executed.
+        OutboundCommand command;
+        command.type = "prompt";
+        command.text = std::move(trimmed_line);
         Send(command);
       } else if (!command_matches.empty()) {
         const CommandInfo& suggestion = state.commands[command_matches[command_match_selected < 0 ? 0 : command_match_selected]];
@@ -1087,8 +1115,18 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         for (size_t i = 0; i < command_palette_boxes.size() && i < command_matches.size(); ++i) {
           if (command_palette_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
             const CommandInfo& command = state.commands[command_matches[i]];
-            input_text = "/" + command.name + " ";
-            RefreshCommandMatches();
+            if (command.hint.empty()) {
+              OutboundCommand run;
+              run.type = "run-command";
+              run.text = "/" + command.name;
+              Send(run);
+              input_text.clear();
+              stick_to_bottom = true;
+              scroll_anchor = 1.0;
+            } else {
+              input_text = "/" + command.name + " ";
+              RefreshCommandMatches();
+            }
             return true;
           }
         }
