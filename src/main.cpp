@@ -68,6 +68,92 @@ std::string ShortId(std::string value, size_t max_chars = 8) {
   return value.substr(0, max_chars) + "…";
 }
 
+enum class SlashSubmitKind { Execute, Fill, Prompt };
+struct SlashSubmitDecision {
+  SlashSubmitKind kind = SlashSubmitKind::Prompt;
+  std::string line;
+  std::string fill;
+};
+
+std::vector<size_t> RankSlashCommands(const std::vector<CommandInfo>& commands,
+                                      const std::string& query) {
+  std::vector<size_t> matches;
+  std::string lower = query;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+  if (lower.empty()) {
+    for (size_t i = 0; i < commands.size(); ++i) matches.push_back(i);
+    return matches;
+  }
+  auto is_subsequence = [](const std::string& q, const std::string& value) {
+    size_t pos = 0;
+    for (char c : value) if (pos < q.size() && c == q[pos]) ++pos;
+    return pos == q.size();
+  };
+  std::vector<std::pair<int, size_t>> ranked;
+  for (size_t i = 0; i < commands.size(); ++i) {
+    const std::string& candidate = commands[i].name;
+    bool prefix = candidate.substr(0, lower.size()) == lower;
+    if (!prefix && !is_subsequence(lower, candidate)) continue;
+    ranked.push_back({(prefix ? 0 : 1000) + static_cast<int>(candidate.size()), i});
+  }
+  std::sort(ranked.begin(), ranked.end());
+  for (const auto& [score, index] : ranked) matches.push_back(index);
+  return matches;
+}
+
+SlashSubmitDecision DecideSlashSubmit(const std::string& input,
+                                      const std::vector<CommandInfo>& commands,
+                                      int selected_match) {
+  SlashSubmitDecision decision;
+  if (input.empty() || input[0] != '/') return decision;
+  std::string name = input.substr(1);
+  size_t space = name.find(' ');
+  if (space != std::string::npos) name.resize(space);
+
+  const CommandInfo* exact = nullptr;
+  for (const auto& command : commands) if (command.name == name) { exact = &command; break; }
+
+  if (exact != nullptr) {
+    std::string after = input.substr(exact->name.size() + 1);
+    bool no_separator = after.empty();
+    bool separator_only =
+        !after.empty() && after.find_first_not_of(" \t\r\n") == std::string::npos;
+    if (no_separator && !exact->hint.empty()) {
+      decision.kind = SlashSubmitKind::Fill;
+      decision.fill = "/" + exact->name + " ";
+      return decision;
+    }
+    if (((no_separator || separator_only) && exact->hint.empty()) ||
+        (!no_separator && !exact->hint.empty())) {
+      decision.kind = SlashSubmitKind::Execute;
+      decision.line = input;
+      return decision;
+    }
+    decision.kind = SlashSubmitKind::Prompt;
+    decision.line = input;
+    return decision;
+  }
+
+  auto matches = RankSlashCommands(commands, name);
+  if (!matches.empty()) {
+    if (selected_match < 0 || selected_match >= static_cast<int>(matches.size())) selected_match = 0;
+    const CommandInfo& suggestion = commands[matches[selected_match]];
+    if (suggestion.hint.empty()) {
+      decision.kind = SlashSubmitKind::Execute;
+      decision.line = "/" + suggestion.name;
+    } else {
+      decision.kind = SlashSubmitKind::Fill;
+      decision.fill = "/" + suggestion.name + " ";
+    }
+    return decision;
+  }
+
+  decision.kind = SlashSubmitKind::Prompt;
+  decision.line = input;
+  return decision;
+}
+
 std::string FormatMs(double value) {
   if (value >= 1000.0) {
     std::ostringstream out;
@@ -362,6 +448,24 @@ int RunSelfTest() {
     std::cerr << "state assertions failed\n";
     return 1;
   }
+  std::vector<CommandInfo> slash_commands = {
+      {"compact", "Compact older conversation history", ""},
+      {"feedback", "record feedback", "<text>"},
+      {"goal", "set or view the goal", "[objective]"},
+  };
+  if (DecideSlashSubmit("/goal", slash_commands, 0).kind != SlashSubmitKind::Fill ||
+      DecideSlashSubmit("/goal", slash_commands, 0).fill != "/goal " ||
+      DecideSlashSubmit("/goal ", slash_commands, 0).kind != SlashSubmitKind::Execute ||
+      DecideSlashSubmit("/goal clear", slash_commands, 0).kind != SlashSubmitKind::Execute ||
+      DecideSlashSubmit("/compact", slash_commands, 0).kind != SlashSubmitKind::Execute ||
+      DecideSlashSubmit("/compact extra", slash_commands, 0).kind != SlashSubmitKind::Prompt ||
+      DecideSlashSubmit("/unknown", slash_commands, 0).kind != SlashSubmitKind::Prompt ||
+      RankSlashCommands(slash_commands, "g").size() != 1 ||
+      RankSlashCommands(slash_commands, "g")[0] != 2) {
+    std::cerr << "slash decision assertions failed\n";
+    return 1;
+  }
+
   OutboundCommand command;
   command.type = "prompt";
   command.text = "a\nb";
@@ -799,37 +903,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     return rest.substr(0, space);
   };
 
-  auto IsSubsequence = [](const std::string& query, const std::string& value) {
-    size_t pos = 0;
-    for (char c : value) {
-      if (pos < query.size() && c == query[pos]) ++pos;
-    }
-    return pos == query.size();
-  };
-
   auto RefreshCommandMatches = [&] {
     command_matches.clear();
-    command_match_selected = -1;
     command_palette_boxes.clear();
-    if (!SlashPaletteActive()) return;
-    std::string name = CommandNameFromInput();
-    std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
-    if (lower.empty()) {
-      for (size_t i = 0; i < state.commands.size(); ++i) command_matches.push_back(i);
-    } else {
-      std::vector<std::pair<int, size_t>> ranked;
-      for (size_t i = 0; i < state.commands.size(); ++i) {
-        std::string candidate = state.commands[i].name;
-        bool prefix = candidate.substr(0, lower.size()) == lower;
-        bool fuzzy = IsSubsequence(lower, candidate);
-        if (!prefix && !fuzzy) continue;
-        int rank = prefix ? 0 : 1;
-        ranked.push_back({rank * 1000 + static_cast<int>(candidate.size()), i});
-      }
-      std::sort(ranked.begin(), ranked.end());
-      for (const auto& [score, index] : ranked) command_matches.push_back(index);
+    if (!SlashPaletteActive()) {
+      command_match_selected = -1;
+      last_command_query.clear();
+      return;
     }
+    std::string name = CommandNameFromInput();
+    command_matches = RankSlashCommands(state.commands, name);
     if (!command_matches.empty()) {
       if (last_command_query == name) {
         if (command_match_selected < 0 ||
@@ -839,6 +922,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       } else {
         command_match_selected = 0;
       }
+    } else {
+      command_match_selected = -1;
     }
     last_command_query = name;
   };
@@ -848,58 +933,23 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (state.approval.active) AnswerApproval();
     else if (state.ask.active) AnswerCurrentQuestion();
     else if (SlashActive()) {
-      std::string name = CommandNameFromInput();
-      const CommandInfo* exact_command = nullptr;
-      for (const auto& command : state.commands) {
-        if (command.name == name) { exact_command = &command; break; }
-      }
-      std::string trimmed_line = Trim(input_text);
-      std::string after_name = exact_command == nullptr ? "" : input_text.substr(exact_command->name.size() + 1);
-      bool no_separator = after_name.empty();
-      bool separator_only = !after_name.empty() &&
-                            after_name.find_first_not_of(" \t\r\n") == std::string::npos;
-      if (exact_command != nullptr && no_separator && !exact_command->hint.empty()) {
-        // WebUI leadingInput claim: `/goal` or `/feedback` alone claims the
-        // token and waits for the user's argument instead of executing.
-        input_text = "/" + exact_command->name + " ";
+      RefreshCommandMatches();
+      SlashSubmitDecision decision = DecideSlashSubmit(input_text, state.commands,
+                                                       command_match_selected);
+      if (decision.kind == SlashSubmitKind::Fill) {
+        input_text = decision.fill;
         RefreshCommandMatches();
         return;
       }
-      if (exact_command != nullptr &&
-          (((no_separator || separator_only) && exact_command->hint.empty()) ||
-           (!no_separator && !exact_command->hint.empty()))) {
-        OutboundCommand command;
+      OutboundCommand command;
+      if (decision.kind == SlashSubmitKind::Execute) {
         command.type = "run-command";
-        command.text = input_text;
-        Send(command);
-      } else if (exact_command != nullptr && !no_separator && !separator_only &&
-                 exact_command->hint.empty()) {
-        // WebUI leaves non-bare no-argument commands unclaimed; the line is
-        // sent as an ordinary prompt instead of being executed.
-        OutboundCommand command;
-        command.type = "prompt";
-        command.text = std::move(trimmed_line);
-        Send(command);
-      } else if (!command_matches.empty()) {
-        const CommandInfo& suggestion = state.commands[command_matches[command_match_selected < 0 ? 0 : command_match_selected]];
-        if (suggestion.hint.empty()) {
-          OutboundCommand command;
-          command.type = "run-command";
-          command.text = "/" + suggestion.name;
-          Send(command);
-        } else {
-          input_text = "/" + suggestion.name + " ";
-          RefreshCommandMatches();
-          return;
-        }
+        command.text = decision.line.empty() ? input_text : decision.line;
       } else {
-        // WebUI default sink: an unclaimed slash line is submitted as a normal
-        // user message instead of being rejected by the composer.
-        OutboundCommand command;
         command.type = "prompt";
-        command.text = std::move(trimmed_line);
-        Send(command);
+        command.text = Trim(decision.line.empty() ? input_text : decision.line);
       }
+      Send(command);
     } else {
       std::string prompt = Trim(input_text);
       if (prompt.empty()) return;
