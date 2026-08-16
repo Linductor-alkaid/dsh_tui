@@ -721,6 +721,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   bool add_workspace_open = false;
   bool add_workspace_focus_path = false;
   bool add_workspace_title_auto = true;
+  bool focus_new_session_after_workspace_add = false;
   std::string add_workspace_path;
   std::string add_workspace_title;
   std::string add_workspace_error;
@@ -1038,6 +1039,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         add_workspace_open = false;
         add_workspace_focus_path = false;
         add_workspace_error.clear();
+        focus_new_session_after_workspace_add = true;
       }
       if (event.type == InboundEvent::Type::Error && add_workspace_open) {
         add_workspace_error = state.error;
@@ -1575,6 +1577,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   center = ResizableSplit(std::move(status_option));
 
   auto renderer = Renderer(center, [&] {
+    if (focus_new_session_after_workspace_add) {
+      new_session_button->TakeFocus();
+      focus_new_session_after_workspace_add = false;
+    }
     if (add_workspace_focus_path && add_workspace_open) {
       add_workspace_path_input->TakeFocus();
       add_workspace_focus_path = false;

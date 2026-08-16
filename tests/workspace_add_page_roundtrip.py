@@ -194,7 +194,7 @@ def main():
                 raise SystemExit(f"add-workspace command was not emitted: {commands}")
 
             time.sleep(0.2)
-            output += drain(master)
+            drain(master)  # drop the modal's pre-reply redraw frames
             send_event(
                 event_w,
                 {"type": "workspaces", "workspaces": [{"id": "w2", "path": path, "title": title, "sessionIds": []}]},
@@ -205,7 +205,9 @@ def main():
             )
 
             time.sleep(0.6)
-            output += drain(master)
+            fresh = drain(master)
+            if "[＋ 新建会话]" not in fresh or "[＋ 添加工作区]" in fresh:
+                raise SystemExit(f"new-session button was not focused after add\n{fresh[-1200:]}")
 
             # Once workspace-added is processed, the modal closes and the new
             # workspace is selected. Ctrl+N must then create a session in w2.
