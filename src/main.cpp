@@ -22,6 +22,7 @@
 #include "ftxui/component/event.hpp"
 #include "ftxui/component/screen_interactive.hpp"
 #include "ftxui/dom/elements.hpp"
+#include "ftxui/screen/box.hpp"
 
 #include "ds_bridge.hpp"
 #include "dsh_launcher.hpp"
@@ -84,7 +85,8 @@ std::string BridgeStatusText(const DeepSeekState& state) {
 
 Element RenderMessage(const ChatMessage& message, size_t index = 0,
                         const std::set<size_t>* expanded_reasoning = nullptr,
-                        size_t active_reasoning = std::string::npos) {
+                        size_t active_reasoning = std::string::npos,
+                        ftxui::Box* reasoning_click_box = nullptr) {
   Color tint = Color::White;
   std::string label = "·";
   switch (message.role) {
@@ -100,13 +102,15 @@ Element RenderMessage(const ChatMessage& message, size_t index = 0,
   if (!message.reasoning.empty()) {
     const bool expanded = expanded_reasoning != nullptr && expanded_reasoning->count(index) != 0;
     const bool active = active_reasoning == index;
-    lines.push_back(hbox({
+    Element reasoning_header = hbox({
         text(expanded ? "  ▾ 思考过程" : "  ▸ 思考过程") |
             bold | color(active ? Color::Cyan : Color::GrayDark),
         text("  " + std::to_string(message.reasoning.size()) + " 字") | dim,
         active ? text("  ←") | color(Color::Cyan) : text(""),
         filler(),
-    }));
+    });
+    if (reasoning_click_box != nullptr) reasoning_header = reasoning_header | reflect(*reasoning_click_box);
+    lines.push_back(reasoning_header);
     if (expanded) {
       lines.push_back(paragraph(message.reasoning) | dim | border);
     }
@@ -727,6 +731,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   double scroll_anchor = 1.0;
   std::set<size_t> expanded_reasoning;
   size_t active_reasoning = std::string::npos;
+  std::vector<ftxui::Box> reasoning_click_boxes;
 
   auto MoveActiveReasoning = [&](int direction) {
     if (state.messages.empty()) return;
@@ -859,9 +864,11 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         if (!state.messages[i - 1].reasoning.empty()) { active_reasoning = i - 1; break; }
       }
     }
+    reasoning_click_boxes.assign(state.messages.size(), ftxui::Box{});
     Elements messages;
     for (size_t i = 0; i < state.messages.size(); ++i) {
-      messages.push_back(RenderMessage(state.messages[i], i, &expanded_reasoning, active_reasoning));
+      messages.push_back(RenderMessage(state.messages[i], i, &expanded_reasoning,
+                                       active_reasoning, &reasoning_click_boxes[i]));
       if (i + 1 < state.messages.size()) messages.push_back(separatorEmpty());
     }
     if (messages.empty()) messages.push_back(text("（暂无消息）") | dim | center);
@@ -911,7 +918,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_component->Render() | flex,
     }));
     main_lines.push_back(hbox({
-        text(std::string("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn 历史 · Ctrl+E 思考") +
+        text(std::string("Enter 发送 · Esc 停止 · Ctrl+N 新建 · PgUp/PgDn 历史 · 点击/Ctrl+E 思考") +
                  (retry_available ? " · Ctrl+R 重连" : "") + " · Ctrl+Q 退出") | dim,
         filler(),
         text(BridgeStatusText(state)) |
@@ -973,6 +980,18 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     return center->Render() | border;
   });
   auto main_component = CatchEvent(renderer, [&](Event event) {
+    if (event.is_mouse() && event.mouse().button == Mouse::Left &&
+        event.mouse().motion == Mouse::Pressed) {
+      for (size_t i = 0; i < reasoning_click_boxes.size() && i < state.messages.size(); ++i) {
+        if (!state.messages[i].reasoning.empty() &&
+            reasoning_click_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
+          active_reasoning = i;
+          if (expanded_reasoning.count(i) != 0) expanded_reasoning.erase(i);
+          else expanded_reasoning.insert(i);
+          return true;
+        }
+      }
+    }
     if (event == Event::Custom) { DrainEvents(); return true; }
     if (event == Event::CtrlQ) {
       OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
