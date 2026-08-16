@@ -786,6 +786,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   };
 
   auto SlashActive = [&] { return !input_text.empty() && input_text[0] == '/'; };
+  auto SlashPaletteActive = [&] {
+    return SlashActive() && input_text.find(' ') == std::string::npos;
+  };
 
   auto CommandNameFromInput = [&]() -> std::string {
     if (!SlashActive()) return {};
@@ -807,7 +810,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     command_matches.clear();
     command_match_selected = -1;
     command_palette_boxes.clear();
-    if (!SlashActive()) return;
+    if (!SlashPaletteActive()) return;
     std::string name = CommandNameFromInput();
     std::string lower = name;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -855,9 +858,16 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         Send(command);
       } else if (!command_matches.empty()) {
         const CommandInfo& suggestion = state.commands[command_matches[command_match_selected < 0 ? 0 : command_match_selected]];
-        input_text = "/" + suggestion.name + " ";
-        RefreshCommandMatches();
-        return;
+        if (suggestion.hint.empty()) {
+          OutboundCommand command;
+          command.type = "run-command";
+          command.text = "/" + suggestion.name;
+          Send(command);
+        } else {
+          input_text = "/" + suggestion.name + " ";
+          RefreshCommandMatches();
+          return;
+        }
       } else {
         state.Add(MessageRole::Error, "未知命令：" + input_text);
       }
@@ -901,12 +911,29 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
       return true;
     }
-    if (event == Event::Tab && SlashActive() && !command_matches.empty()) {
+    if (event == Event::Tab && SlashPaletteActive() && !command_matches.empty()) {
       if (command_match_selected < 0) command_match_selected = 0;
       else command_match_selected = (command_match_selected + 1) % static_cast<int>(command_matches.size());
       const CommandInfo& suggestion = state.commands[command_matches[command_match_selected]];
-      input_text = "/" + suggestion.name + " ";
-      RefreshCommandMatches();
+      if (suggestion.hint.empty()) {
+        OutboundCommand command;
+        command.type = "run-command";
+        command.text = "/" + suggestion.name;
+        Send(command);
+        input_text.clear();
+        stick_to_bottom = true;
+        scroll_anchor = 1.0;
+      } else {
+        input_text = "/" + suggestion.name + " ";
+        RefreshCommandMatches();
+      }
+      return true;
+    }
+    if ((event == Event::ArrowUp || event == Event::ArrowDown) &&
+        SlashPaletteActive() && !command_matches.empty()) {
+      int delta = event == Event::ArrowUp ? -1 : 1;
+      int size = static_cast<int>(command_matches.size());
+      command_match_selected = (command_match_selected + size + delta) % size;
       return true;
     }
     return false;
@@ -981,7 +1008,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
     RefreshCommandMatches();
     Element command_palette = emptyElement();
-    if (SlashActive() && !command_matches.empty()) {
+    if (SlashPaletteActive() && !command_matches.empty()) {
       command_palette_boxes.assign(command_matches.size(), ftxui::Box{});
       Elements command_rows;
       for (size_t i = 0; i < command_matches.size(); ++i) {
@@ -998,7 +1025,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         command_rows.push_back(paragraph("    " + command.description) | dim);
       }
       command_palette = window(text(" 命令 "), vbox(std::move(command_rows)));
-    } else if (SlashActive()) {
+    } else if (SlashPaletteActive()) {
       command_palette = window(text(" 命令 "), text("未知命令") | color(Color::Red));
     }
 
@@ -1033,7 +1060,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     main_lines.push_back(separator());
     main_lines.push_back(history);
-    if (SlashActive()) {
+    if (SlashPaletteActive()) {
       main_lines.push_back(separator());
       main_lines.push_back(command_palette);
     }
@@ -1111,7 +1138,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto main_component = CatchEvent(renderer, [&](Event event) {
     if (event.is_mouse() && event.mouse().button == Mouse::Left &&
         event.mouse().motion == Mouse::Pressed) {
-      if (SlashActive()) {
+      if (SlashPaletteActive()) {
         for (size_t i = 0; i < command_palette_boxes.size() && i < command_matches.size(); ++i) {
           if (command_palette_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
             const CommandInfo& command = state.commands[command_matches[i]];
@@ -1144,6 +1171,11 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (event == Event::Custom) { DrainEvents(); return true; }
     if (event == Event::CtrlQ) {
       OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
+    }
+    if (event == Event::Escape && SlashPaletteActive()) {
+      input_text.clear();
+      RefreshCommandMatches();
+      return true;
     }
     if (event == Event::CtrlC || event == Event::Escape) {
       if (state.running) { OutboundCommand command; command.type = "cancel"; Send(command); }
