@@ -462,6 +462,17 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     if (session_entries.empty()) session_entries.push_back("（无会话）");
     if (session_selected >= static_cast<int>(session_entries.size())) session_selected = 0;
+    if (!state.session_id.empty() && !state.workspaces.empty() &&
+        workspace_selected >= 0 && workspace_selected < static_cast<int>(state.workspaces.size())) {
+      const auto& ids = state.workspaces[workspace_selected].session_ids;
+      for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] == state.session_id) { session_selected = static_cast<int>(i); break; }
+      }
+    } else if (!state.session_id.empty() && state.workspaces.empty()) {
+      for (size_t i = 0; i < state.sessions.size(); ++i) {
+        if (state.sessions[i].id == state.session_id) { session_selected = static_cast<int>(i); break; }
+      }
+    }
   };
 
   auto RebuildModelMenu = [&] {
@@ -638,6 +649,8 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         RebuildModelMenu();
         RebuildReasoningMenu();
         if (event.type == InboundEvent::Type::Hello) {
+          RebuildWorkspaceMenu();
+          RebuildSessionMenu();
           RebuildPresetMenu();
           for (size_t i = 0; i < state.models.size(); ++i) {
             if (state.models[i].provider == state.provider && state.models[i].id == state.model) {

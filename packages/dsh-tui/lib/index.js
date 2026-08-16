@@ -48,14 +48,36 @@ function readJsonFile(path, fallback) {
   }
 }
 
+const sessionTitleOverrides = new Map();
+const workspaceSessionExtras = new Map();
+
 function workspaceSnapshot() {
   const storage = readJsonFile(join(dshHome(), "storages", "workspace.json"), {});
   const cache = readJsonFile(join(dshHome(), "storages", "session_projcache.json"), {});
   const workspaces = [];
   const sessions = [];
+  const seenSessions = new Set();
   const table = storage?.tables?.workspaces ?? {};
+
+  const addSession = (sessionId, workspaceId, workspacePath, fallbackTitle) => {
+    if (seenSessions.has(sessionId)) return;
+    seenSessions.add(sessionId);
+    const cached = cache?.tables?.sessions?.[sessionId];
+    sessions.push({
+      id: sessionId,
+      title: sessionTitleOverrides.get(sessionId) ?? cached?.rows?.title?.val ?? fallbackTitle ?? sessionId,
+      cwd: workspacePath ?? process.cwd(),
+      workspaceId
+    });
+  };
+
   for (const [id, workspace] of Object.entries(table)) {
-    const sessionIds = Array.isArray(workspace?.sessionIds) ? workspace.sessionIds : [];
+    const baseIds = Array.isArray(workspace?.sessionIds) ? workspace.sessionIds : [];
+    const extraIds = workspaceSessionExtras.get(id) ?? [];
+    const sessionIds = [...baseIds];
+    for (const sessionId of extraIds) {
+      if (!sessionIds.includes(sessionId)) sessionIds.push(sessionId);
+    }
     workspaces.push({
       id,
       path: workspace?.path ?? "",
@@ -63,15 +85,15 @@ function workspaceSnapshot() {
       sessionIds
     });
     for (const sessionId of sessionIds) {
-      const cached = cache?.tables?.sessions?.[sessionId];
-      sessions.push({
-        id: sessionId,
-        title: cached?.rows?.title?.val ?? sessionId,
-        cwd: workspace?.path ?? process.cwd(),
-        workspaceId: id
-      });
+      addSession(sessionId, id, workspace?.path ?? "", undefined);
     }
   }
+
+  // Sessions created while no workspace metadata existed yet.
+  for (const sessionId of sessionTitleOverrides.keys()) {
+    if (!seenSessions.has(sessionId)) addSession(sessionId, "", process.cwd(), "新会话");
+  }
+
   return { workspaces, sessions };
 }
 
@@ -174,6 +196,8 @@ function historyPayload(events, boundary) {
 }
 
 export function apply(ctx, config) {
+  sessionTitleOverrides.clear();
+  workspaceSessionExtras.clear();
   const appExit = ctx.get("appExit");
   if (typeof appExit !== "function") {
     throw new Error("dsh-tui: the launcher must provide ctx.appExit before the tree mounts");
@@ -408,6 +432,14 @@ export function apply(ctx, config) {
         });
       }
       liveAgent = liveHandle.agent;
+      if (options.workspaceId) {
+        const extras = workspaceSessionExtras.get(options.workspaceId) ?? [];
+        if (!extras.includes(liveAgent.session.id)) {
+          extras.push(liveAgent.session.id);
+          workspaceSessionExtras.set(options.workspaceId, extras);
+        }
+        sessionTitleOverrides.set(liveAgent.session.id, "新会话");
+      }
 
       post({ type: "reset", reason: options.resumeSessionId ? "正在恢复会话…" : "正在创建新会话…" });
       postWorkspaces();
@@ -590,7 +622,7 @@ export function apply(ctx, config) {
         const snapshot = workspaceSnapshot();
         const workspaceId = String(command.text ?? "");
         const workspace = snapshot.workspaces.find((item) => item.id === workspaceId);
-        await switchSession({ cwd: workspace?.path ?? process.cwd() });
+        await switchSession({ cwd: workspace?.path ?? process.cwd(), workspaceId });
         break;
       }
       case "answer": {
@@ -737,6 +769,10 @@ export function apply(ctx, config) {
       case "request/context":
         contextWindow = event.data.contextWindow ?? contextWindow;
         postStats();
+        break;
+      case "session/title":
+        sessionTitleOverrides.set(session.id, event.data.title ?? session.id);
+        postWorkspaces();
         break;
       default:
         break;
