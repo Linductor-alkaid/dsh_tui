@@ -589,6 +589,7 @@ export function apply(ctx, config) {
           }
         }
         post({ type: "preset", id: presetId, name: preset?.name ?? presetId });
+        postCommands();
         if (applied) {
           post({
             type: "hello",

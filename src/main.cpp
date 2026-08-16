@@ -504,6 +504,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
 
   DeepSeekState state;
   std::string input_text;
+  std::string input_placeholder = "输入消息，Enter 发送";
   if (!launch_error.empty()) {
     state.closed = true;
     state.error = launch_error;
@@ -928,6 +929,23 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     last_command_query = name;
   };
 
+  auto UpdateInputPlaceholder = [&] {
+    if (SlashPaletteActive()) {
+      input_placeholder = "搜索命令…";
+      return;
+    }
+    if (SlashActive()) {
+      std::string name = CommandNameFromInput();
+      for (const auto& command : state.commands) {
+        if (command.name == name && !command.hint.empty()) {
+          input_placeholder = command.hint;
+          return;
+        }
+      }
+    }
+    input_placeholder = "输入消息，Enter 发送";
+  };
+
   auto Submit = [&] {
     if (state.closed || !state.hello_seen) return;
     if (state.approval.active) AnswerApproval();
@@ -966,7 +984,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   InputOption input_option = InputOption::Spacious();
   input_option.multiline = false;
   input_option.on_enter = Submit;
-  auto input_component = Input(&input_text, "输入消息，Enter 发送", input_option);
+  auto input_component = Input(&input_text, &input_placeholder, input_option);
   // Intercept history-scrolling keys before the text input consumes them.
   input_component |= CatchEvent([&](Event event) {
     if (event == Event::Home) { stick_to_bottom = false; scroll_anchor = 0.0; return true; }
@@ -1147,6 +1165,7 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       main_lines.push_back(separator());
       main_lines.push_back(question_panel);
     }
+    UpdateInputPlaceholder();
     main_lines.push_back(separator());
     main_lines.push_back(hbox({
         text("❯ ") | bold | color(Color::Cyan),
