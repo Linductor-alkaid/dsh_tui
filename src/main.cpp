@@ -121,13 +121,7 @@ SlashSubmitDecision DecideSlashSubmit(const std::string& input,
     bool no_separator = after.empty();
     bool separator_only =
         !after.empty() && after.find_first_not_of(" \t\r\n") == std::string::npos;
-    if (no_separator && !exact->hint.empty()) {
-      decision.kind = SlashSubmitKind::Fill;
-      decision.fill = "/" + exact->name + " ";
-      return decision;
-    }
-    if (((no_separator || separator_only) && exact->hint.empty()) ||
-        (!no_separator && !exact->hint.empty())) {
+    if (!exact->hint.empty() || no_separator || separator_only) {
       decision.kind = SlashSubmitKind::Execute;
       decision.line = input;
       return decision;
@@ -511,8 +505,7 @@ int RunSelfTest() {
     return 1;
   }
 
-  if (DecideSlashSubmit("/goal", slash_commands, 0).kind != SlashSubmitKind::Fill ||
-      DecideSlashSubmit("/goal", slash_commands, 0).fill != "/goal " ||
+  if (DecideSlashSubmit("/goal", slash_commands, 0).kind != SlashSubmitKind::Execute ||
       DecideSlashSubmit("/goal ", slash_commands, 0).kind != SlashSubmitKind::Execute ||
       DecideSlashSubmit("/goal clear", slash_commands, 0).kind != SlashSubmitKind::Execute ||
       DecideSlashSubmit("/compact", slash_commands, 0).kind != SlashSubmitKind::Execute ||
@@ -1033,6 +1026,18 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         input_text.clear();
         stick_to_bottom = true;
         scroll_anchor = 1.0;
+        return;
+      }
+      if (CommandNameFromInput() == "permission" &&
+          input_text.size() == std::string("/permission").size()) {
+        slash_permission_popup = true;
+        slash_permission_selected = -1;
+        for (size_t i = 0; i < state.permissions.size(); ++i) {
+          if (state.permissions[i].id == state.permission_id) slash_permission_selected = static_cast<int>(i);
+        }
+        if (slash_permission_selected < 0 && !state.permissions.empty()) slash_permission_selected = 0;
+        input_text = "/permission ";
+        RefreshCommandMatches();
         return;
       }
       SlashSubmitDecision decision = DecideSlashSubmit(input_text, state.commands,
