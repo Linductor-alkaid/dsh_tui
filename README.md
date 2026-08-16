@@ -82,6 +82,7 @@ DSH_LAUNCHER="/path/to/deepseek-dsh-bin" ./scripts/run-tui.sh
 - 模式选择：标准模式 / PTC 模式 / 极简模式 / 创造模式（agent presets）
 - 权限设置：只读 / 工作区写入 / 完全访问（sandbox + approval 预设）
 - `/` 斜杠命令：WebUI 式模糊匹配、说明/输入提示、方向键选择、Tab/点击/Enter 决策，并调用 dsh 命令注册表真实执行
+- `/permission` 弹出权限预设选择器，与 WebUI 的 permission popup 对齐
 - 模型选择与思考深度选择（读取 dsh llm 目录并写入默认模型）
 - 新建会话 / `--resume <id>` 恢复会话 / 运行中切换会话
 - 流式文本展示；reasoning 默认折叠，`Ctrl+E` 展开/收起，`Ctrl+↑/↓` 选择思考块

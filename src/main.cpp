@@ -860,6 +860,9 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   int command_match_selected = -1;
   std::string last_command_query;
   std::vector<ftxui::Box> command_palette_boxes;
+  bool slash_permission_popup = false;
+  int slash_permission_selected = -1;
+  std::vector<ftxui::Box> slash_permission_boxes;
 
   auto MoveActiveReasoning = [&](int direction) {
     if (state.messages.empty()) return;
@@ -929,6 +932,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     last_command_query = name;
   };
 
+  auto PermissionLabelFor = [&](const PermissionPresetInfo& permission) {
+    std::string label = permission.name;
+    if (permission.id == "read-only") label = "只读 (read-only)";
+    else if (permission.id == "workspace-write") label = "工作区写入 (workspace-write)";
+    else if (permission.id == "danger-full-access") label = "完全访问 (full access)";
+    return label.empty() ? permission.id : label;
+  };
+
   auto UpdateInputPlaceholder = [&] {
     if (SlashPaletteActive()) {
       input_placeholder = "搜索命令…";
@@ -952,10 +963,32 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     else if (state.ask.active) AnswerCurrentQuestion();
     else if (SlashActive()) {
       RefreshCommandMatches();
+      if (slash_permission_popup) {
+        if (slash_permission_selected >= 0 &&
+            slash_permission_selected < static_cast<int>(state.permissions.size())) {
+          OutboundCommand command;
+          command.type = "run-command";
+          command.text = "/permission " + state.permissions[slash_permission_selected].id;
+          Send(command);
+        }
+        slash_permission_popup = false;
+        input_text.clear();
+        stick_to_bottom = true;
+        scroll_anchor = 1.0;
+        return;
+      }
       SlashSubmitDecision decision = DecideSlashSubmit(input_text, state.commands,
                                                        command_match_selected);
       if (decision.kind == SlashSubmitKind::Fill) {
         input_text = decision.fill;
+        if (CommandNameFromInput() == "permission") {
+          slash_permission_popup = true;
+          slash_permission_selected = -1;
+          for (size_t i = 0; i < state.permissions.size(); ++i) {
+            if (state.permissions[i].id == state.permission_id) slash_permission_selected = static_cast<int>(i);
+          }
+          if (slash_permission_selected < 0 && !state.permissions.empty()) slash_permission_selected = 0;
+        }
         RefreshCommandMatches();
         return;
       }
@@ -1008,6 +1041,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
       if (scroll_anchor >= 0.999) { stick_to_bottom = true; scroll_anchor = 1.0; }
       return true;
     }
+    if (slash_permission_popup && (event == Event::Tab || event == Event::ArrowUp || event == Event::ArrowDown) &&
+        !state.permissions.empty()) {
+      int size = static_cast<int>(state.permissions.size());
+      int delta = event == Event::ArrowUp ? -1 : event == Event::ArrowDown ? 1 : 1;
+      if (slash_permission_selected < 0) slash_permission_selected = 0;
+      else slash_permission_selected = (slash_permission_selected + size + delta) % size;
+      return true;
+    }
     if (event == Event::Tab && SlashPaletteActive() && !command_matches.empty()) {
       if (command_match_selected < 0) command_match_selected = 0;
       else command_match_selected = (command_match_selected + 1) % static_cast<int>(command_matches.size());
@@ -1022,6 +1063,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
         scroll_anchor = 1.0;
       } else {
         input_text = "/" + suggestion.name + " ";
+        if (suggestion.name == "permission") {
+          slash_permission_popup = true;
+          slash_permission_selected = -1;
+          for (size_t j = 0; j < state.permissions.size(); ++j) {
+            if (state.permissions[j].id == state.permission_id) slash_permission_selected = static_cast<int>(j);
+          }
+          if (slash_permission_selected < 0 && !state.permissions.empty()) slash_permission_selected = 0;
+        }
         RefreshCommandMatches();
       }
       return true;
@@ -1104,6 +1153,28 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
                       yframe | vscroll_indicator | flex;
 
     RefreshCommandMatches();
+    if (slash_permission_popup &&
+        !(SlashActive() && CommandNameFromInput() == "permission")) {
+      slash_permission_popup = false;
+      slash_permission_selected = -1;
+    }
+    Element permission_popup = emptyElement();
+    if (slash_permission_popup) {
+      slash_permission_boxes.assign(state.permissions.size(), ftxui::Box{});
+      Elements permission_rows;
+      for (size_t i = 0; i < state.permissions.size(); ++i) {
+        const auto& permission = state.permissions[i];
+        const bool selected = static_cast<int>(i) == slash_permission_selected;
+        Element row = hbox({
+            text(selected ? "❯ " : "  ") | color(selected ? Color::Cyan : Color::White),
+            text(PermissionLabelFor(permission)) | (selected ? bold : nothing),
+            filler(),
+        });
+        row = row | reflect(slash_permission_boxes[i]);
+        permission_rows.push_back(row);
+      }
+      permission_popup = window(text(" 权限预设 "), vbox(std::move(permission_rows)));
+    }
     Element command_palette = emptyElement();
     if (SlashPaletteActive() && !command_matches.empty()) {
       command_palette_boxes.assign(command_matches.size(), ftxui::Box{});
@@ -1157,6 +1228,10 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     }
     main_lines.push_back(separator());
     main_lines.push_back(history);
+    if (slash_permission_popup) {
+      main_lines.push_back(separator());
+      main_lines.push_back(permission_popup);
+    }
     if (SlashPaletteActive()) {
       main_lines.push_back(separator());
       main_lines.push_back(command_palette);
@@ -1236,6 +1311,22 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
   auto main_component = CatchEvent(renderer, [&](Event event) {
     if (event.is_mouse() && event.mouse().button == Mouse::Left &&
         event.mouse().motion == Mouse::Pressed) {
+      if (slash_permission_popup) {
+        for (size_t i = 0; i < slash_permission_boxes.size() && i < state.permissions.size(); ++i) {
+          if (slash_permission_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
+            slash_permission_selected = static_cast<int>(i);
+            OutboundCommand command;
+            command.type = "run-command";
+            command.text = "/permission " + state.permissions[i].id;
+            Send(command);
+            slash_permission_popup = false;
+            input_text.clear();
+            stick_to_bottom = true;
+            scroll_anchor = 1.0;
+            return true;
+          }
+        }
+      }
       if (SlashPaletteActive()) {
         for (size_t i = 0; i < command_palette_boxes.size() && i < command_matches.size(); ++i) {
           if (command_palette_boxes[i].Contain(event.mouse().x, event.mouse().y)) {
@@ -1250,6 +1341,14 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
               scroll_anchor = 1.0;
             } else {
               input_text = "/" + command.name + " ";
+              if (command.name == "permission") {
+                slash_permission_popup = true;
+                slash_permission_selected = -1;
+                for (size_t j = 0; j < state.permissions.size(); ++j) {
+                  if (state.permissions[j].id == state.permission_id) slash_permission_selected = static_cast<int>(j);
+                }
+                if (slash_permission_selected < 0 && !state.permissions.empty()) slash_permission_selected = 0;
+              }
               RefreshCommandMatches();
             }
             return true;
@@ -1269,6 +1368,13 @@ int RunBridgeLoop(int event_fd, int command_fd, const std::string& launch_error 
     if (event == Event::Custom) { DrainEvents(); return true; }
     if (event == Event::CtrlQ) {
       OutboundCommand command; command.type = "quit"; Send(command); screen.Exit(); return true;
+    }
+    if (event == Event::Escape && slash_permission_popup) {
+      slash_permission_popup = false;
+      slash_permission_selected = -1;
+      input_text = "/permission";
+      RefreshCommandMatches();
+      return true;
     }
     if (event == Event::Escape && SlashPaletteActive()) {
       input_text.clear();
