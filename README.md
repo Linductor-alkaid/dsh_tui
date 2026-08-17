@@ -11,7 +11,7 @@ WebUI：左侧工作区/会话选择，中间流式对话，右侧状态、token
 > PATH 中的裸 `dsh`，启动脚本显式使用 `npx @deepseek-ai/dsh`。
 
 <p align="center">
-  <img src="./docs/dsh-tui.png" alt="dsh TUI 展示图" />
+  <img src="docs/dsh-tui.png" alt="dsh TUI 展示图" />
 </p>
 
 ## 架构
