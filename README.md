@@ -10,18 +10,28 @@ WebUI：左侧工作区/会话选择，中间流式对话，右侧状态、token
 > 注意：apt 的 `dsh` 是 dancer's distributed shell，二者同名。本项目**不会**调用
 > PATH 中的裸 `dsh`，启动脚本显式使用 `npx @deepseek-ai/dsh`。
 
-![dsh TUI 展示图](docs/dsh-tui.png)
+<p align="center">
+  <img src="./docs/dsh-tui.png" alt="dsh TUI 展示图" />
+</p>
 
 ## 架构
 
-```
-npx @deepseek-ai/dsh --profile tui
- ├─ @deepseek-ai/dsh-base        (agent / session / tools / approval)
- └─ packages/dsh-tui
-      ├─ startup.js              解析 --resume / --binary / --help
-      └─ index.js                创建/恢复 Agent，spawn 原生前端
-           fd3 ───────────────▶ dsh_tui (C++) 读 JSON-lines 事件
-           fd4 ◀─────────────── dsh_tui 写 prompt/resume/new-session/answer
+```mermaid
+flowchart LR
+    launcher["npx @deepseek-ai/dsh --profile tui"]
+    base["@deepseek-ai/dsh-base<br/>(agent / session / tools / approval)"]
+    profile["packages/dsh-tui"]
+    startup["startup.js<br/>解析 --resume / --binary / --help"]
+    index["index.js<br/>创建/恢复 Agent，spawn 原生前端"]
+    tui["dsh_tui (C++)"]
+
+    launcher --> base
+    launcher --> profile
+    profile --> startup
+    profile --> index
+    index --> tui
+    index -->|"fd3：JSON-lines 事件"| tui
+    tui -->|"fd4：prompt / resume / new-session / answer"| index
 ```
 
 `dsh` 的原生前端把 stdin/stdout 留给终端，协议走额外 fd3/fd4，因此 FTXUI
