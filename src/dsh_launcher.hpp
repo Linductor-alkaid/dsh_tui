@@ -1,14 +1,16 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace dsh_tui {
 
 struct BridgeProcess {
-  int pid = -1;
-  int event_fd = -1;    // parent reads JSON events emitted by dsh on its fd 3
-  int command_fd = -1;  // parent writes commands read by dsh on its fd 4
+  std::intptr_t process_handle = -1;
+  std::intptr_t pid = -1;
+  int event_fd = -1;    // parent reads JSON events from fd 3 or a Windows pipe
+  int command_fd = -1;  // parent writes commands to fd 4 or a Windows pipe
   int stderr_fd = -1;   // captured dsh/npx diagnostics for the status rail
 };
 
@@ -20,8 +22,8 @@ std::vector<std::string> BuildDeepSeekLauncherArgv(const std::string& resume_ses
 /// packages/dsh-tui bundle into the profile node_modules.
 bool EnsureTuiProfile(std::string& error);
 
-/// Fork/exec DeepSeek Harness with fd 3/4 wired as the TUI bridge transport.
-/// `DSH_TUI_PARENT=1` tells the JS bridge to use those fds instead of
+/// Launch DeepSeek Harness with fd 3/4 (POSIX) or named pipes (Windows).
+/// `DSH_TUI_PARENT=1` tells the JS bridge to use that transport instead of
 /// spawning another native frontend.
 BridgeProcess SpawnDeepSeekBridge(const std::string& resume_session_id,
                                   std::string& error);

@@ -51,20 +51,29 @@ target_link_libraries(dsh_tui PRIVATE
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(dsh_tui PRIVATE -Wall -Wextra -Wpedantic)
+elseif(MSVC)
+  target_compile_options(dsh_tui PRIVATE /W4 /utf-8)
 endif()
 
 include(GNUInstallDirs)
 install(TARGETS dsh_tui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 enable_testing()
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME bridge_roundtrip
-         COMMAND ${Python3_EXECUTABLE}
-                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/bridge_roundtrip.py
-                 $<TARGET_FILE:dsh_tui>)
+add_test(NAME self_test COMMAND dsh_tui --self-test)
 
-add_test(NAME workspace_add_page_roundtrip
-         COMMAND ${Python3_EXECUTABLE}
-                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/workspace_add_page_roundtrip.py
-                 $<TARGET_FILE:dsh_tui>)
-set_tests_properties(workspace_add_page_roundtrip PROPERTIES TIMEOUT 20)
+# These integration tests use POSIX fd remapping and a pseudo-terminal. The
+# same protocol is compile- and smoke-tested on Windows by self_test; Windows
+# named-pipe transport is exercised when launching dsh_tui normally.
+if(UNIX)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME bridge_roundtrip
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/bridge_roundtrip.py
+                   $<TARGET_FILE:dsh_tui>)
+
+  add_test(NAME workspace_add_page_roundtrip
+           COMMAND ${Python3_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/workspace_add_page_roundtrip.py
+                   $<TARGET_FILE:dsh_tui>)
+  set_tests_properties(workspace_add_page_roundtrip PROPERTIES TIMEOUT 20)
+endif()

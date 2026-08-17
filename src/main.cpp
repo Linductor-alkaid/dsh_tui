@@ -1,5 +1,14 @@
+#ifdef _WIN32
+#include <io.h>
+#define isatty _isatty
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#endif
+#else
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -54,8 +63,12 @@ void PrintUsage() {
 }
 
 bool FdIsUsable(int fd) {
+#ifdef _WIN32
+  return ::_get_osfhandle(fd) != -1;
+#else
   int flags = ::fcntl(fd, F_GETFL);
   return flags >= 0 || errno != EBADF;
+#endif
 }
 
 std::string Trim(std::string value) {
@@ -1750,7 +1763,7 @@ int RunStandaloneMode(const std::string& resume_session_id) {
       continue;
     }
     BridgeProcess process = SpawnDeepSeekBridge(resume_session_id, error);
-    if (process.pid <= 0) {
+    if (process.process_handle < 0) {
       code = RunBridgeLoop(-1, -1, error, true, &retry_requested);
       continue;
     }

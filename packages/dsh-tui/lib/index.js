@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   createReadStream,
+  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -903,10 +904,18 @@ export function apply(ctx, config) {
     commandLines.on("close", () => void shutdown(0));
   };
 
-  // Parent mode: dsh_tui itself forked this dsh process with fd 3 (events,
-  // child -> parent) and fd 4 (commands, parent -> child). The native frontend
-  // is already the process that launched us, so do not spawn a second one.
+  // Parent mode: dsh_tui launched this process with fd 3/4 on POSIX or named
+  // pipes on Windows. The native frontend already exists, so do not spawn a
+  // second one.
   const attachParentTransport = () => {
+    const eventPipe = process.env.DSH_TUI_EVENT_PIPE;
+    const commandPipe = process.env.DSH_TUI_COMMAND_PIPE;
+    if (process.platform === "win32" && eventPipe && commandPipe) {
+      eventsOut = createWriteStream(eventPipe);
+      eventsOut.on("error", () => void shutdown(1));
+      wireCommandLines(createReadStream(commandPipe));
+      return;
+    }
     eventsOut = {
       destroyed: false,
       writable: true,

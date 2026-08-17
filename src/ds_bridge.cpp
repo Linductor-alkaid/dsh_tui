@@ -1,8 +1,13 @@
 #include "ds_bridge.hpp"
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
+#endif
 
 #include <cerrno>
 #include <chrono>
@@ -25,11 +30,13 @@ void PostWakeup(ftxui::App* screen) {
 }  // namespace
 
 void BridgeReader::run(std::stop_token stop_token) {
+#ifndef _WIN32
   for (int fd : {event_fd_, stderr_fd_}) {
     if (fd < 0) continue;
     int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags >= 0) (void)::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   }
+#endif
 
   struct LineReader {
     std::string buffer;
@@ -38,13 +45,23 @@ void BridgeReader::run(std::stop_token stop_token) {
       if (eof || fd < 0) return;
       char chunk[8192];
       for (;;) {
+#ifdef _WIN32
+        int count = ::_read(fd, chunk, static_cast<unsigned int>(sizeof(chunk)));
+#else
         ssize_t count = ::read(fd, chunk, sizeof(chunk));
+#endif
         if (count > 0) {
           buffer.append(chunk, static_cast<size_t>(count));
           if (buffer.size() > kMaxLineBytes) buffer.resize(kMaxLineBytes);
+#ifdef _WIN32
+          break;
+#else
           continue;
+#endif
         }
+#ifndef _WIN32
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+#endif
         if (count < 0 && errno == EINTR) continue;
         eof = true;
         break;
@@ -64,6 +81,27 @@ void BridgeReader::run(std::stop_token stop_token) {
   LineReader event_reader;
   LineReader log_reader;
   while (!stop_token.stop_requested()) {
+#ifdef _WIN32
+    auto pipe_ready = [](int fd, bool& eof) {
+      if (fd < 0 || eof) return false;
+      const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(fd));
+      if (handle == INVALID_HANDLE_VALUE) { eof = true; return false; }
+      DWORD available = 0;
+      if (!::PeekNamedPipe(handle, nullptr, 0, nullptr, &available, nullptr)) {
+        const DWORD error = ::GetLastError();
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) eof = true;
+        return false;
+      }
+      return available > 0;
+    };
+    const bool event_ready = pipe_ready(event_fd_, event_reader.eof);
+    const bool log_ready = pipe_ready(stderr_fd_, log_reader.eof);
+    if (!event_ready && !log_ready) {
+      if (event_reader.eof && (stderr_fd_ < 0 || log_reader.eof)) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+#else
     pollfd descriptors[2] = {
         {event_fd_, static_cast<short>(POLLIN | POLLHUP), 0},
         {stderr_fd_, static_cast<short>(stderr_fd_ >= 0 ? (POLLIN | POLLHUP) : 0), 0},
@@ -74,9 +112,14 @@ void BridgeReader::run(std::stop_token stop_token) {
       break;
     }
     if (ready == 0) continue;
+#endif
 
     std::vector<std::string> lines;
+#ifdef _WIN32
+    if (event_ready) {
+#else
     if ((descriptors[0].revents & (POLLIN | POLLHUP)) != 0) {
+#endif
       event_reader.Read(event_fd_, lines);
       for (auto& line : lines) {
         if (std::getenv("DSH_TUI_DEBUG_BRIDGE") != nullptr) {
@@ -96,7 +139,11 @@ void BridgeReader::run(std::stop_token stop_token) {
       }
       lines.clear();
     }
+#ifdef _WIN32
+    if (log_ready) {
+#else
     if (stderr_fd_ >= 0 && (descriptors[1].revents & (POLLIN | POLLHUP)) != 0) {
+#endif
       log_reader.Read(stderr_fd_, lines);
       for (auto& line : lines) {
         InboundEvent log_event;
@@ -127,14 +174,21 @@ bool SendCommand(int command_fd, const OutboundCommand& command) {
   line.push_back('\n');
   size_t written = 0;
   while (written < line.size()) {
+#ifdef _WIN32
+    int count = ::_write(command_fd, line.data() + written,
+                         static_cast<unsigned int>(line.size() - written));
+#else
     ssize_t count = ::write(command_fd, line.data() + written, line.size() - written);
+#endif
     if (count < 0) {
       if (errno == EINTR) continue;
+#ifndef _WIN32
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         pollfd descriptor{command_fd, POLLOUT, 0};
         if (::poll(&descriptor, 1, 200) <= 0) return false;
         continue;
       }
+#endif
       return false;
     }
     written += static_cast<size_t>(count);

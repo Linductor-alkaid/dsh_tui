@@ -46,13 +46,28 @@ cmake --build build -j
 ./build/dsh_tui --self-test
 ```
 
+Windows（Visual Studio 2022 / MSVC）使用多配置生成器：
+
+```powershell
+cmake -S . -B build -A x64
+cmake --build build --config Release --parallel
+.\build\Release\dsh_tui.exe --self-test
+.\build\Release\dsh_tui.exe
+```
+
+需要 CMake 3.20+、支持 C++20 的编译器、Node.js/npm，以及完整拉取的 git
+submodule。Windows 独立启动模式使用命名管道连接原生前端与 Node bridge，
+不依赖 Unix 的 `fork`、信号或固定文件描述符继承；profile bundle 会复制到
+`%DSH_HOME%\profiles\tui\node_modules\dsh-tui`，无需管理员权限创建符号链接。
+
 ## 启动
 
 直接运行即可。`dsh_tui` 会：
 
 1. 自动初始化 `$DSH_HOME/profiles/tui`（默认 `~/.dsh/profiles/tui`）；
 2. 通过 `npx @deepseek-ai/dsh`（或 `$DSH_BIN`）启动 DeepSeek Harness；
-3. 在 fd3/fd4 上完成桥接，用户只会在状态栏看到 `◌ 桥接中… → ● 桥接已连接`。
+3. 通过 Unix fd3/fd4 或 Windows 命名管道完成桥接，用户只会在状态栏看到
+   `◌ 桥接中… → ● 桥接已连接`。
 
 ```bash
 ./build/dsh_tui
@@ -123,3 +138,6 @@ third_party/executor executor（git submodule）
 git submodule update --init --recursive   # 首次 clone 后拉取第三方库
 git log --oneline --decorate --all
 ```
+
+GitHub Actions 会在 Ubuntu 和 Windows Server 上分别编译并运行 CTest；Linux
+额外运行 fd/PTY 端到端测试，Windows 运行原生协议/状态 smoke test。
