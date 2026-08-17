@@ -10,6 +10,8 @@ WebUI：左侧工作区/会话选择，中间流式对话，右侧状态、token
 > 注意：apt 的 `dsh` 是 dancer's distributed shell，二者同名。本项目**不会**调用
 > PATH 中的裸 `dsh`，启动脚本显式使用 `npx @deepseek-ai/dsh`。
 
+![dsh TUI 展示图](docs/dsh-tui.png)
+
 ## 架构
 
 ```
